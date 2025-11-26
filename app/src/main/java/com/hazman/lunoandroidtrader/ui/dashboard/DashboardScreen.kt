@@ -33,8 +33,9 @@ import kotlin.math.roundToInt
  * - Account overview (approx equity MYR, free MYR balance, balances by asset)
  * - Risk overview (risk config values)
  * - Derived risk metrics (max risk per trade in MYR)
+ * - Strategy / paper-trading status
  *
- * This is still "read-only" / paper-planning. No real trades yet.
+ * Still paper-only – no real orders.
  */
 @Composable
 fun DashboardScreen(modifier: Modifier = Modifier) {
@@ -101,6 +102,18 @@ fun DashboardScreen(modifier: Modifier = Modifier) {
             )
             Spacer(modifier = Modifier.height(16.dp))
         }
+
+        StrategyCard(
+            lastDecision = uiState.lastStrategyDecision,
+            lastSignal = uiState.lastSimulatedSignal,
+            openTradesCount = uiState.openSimulatedTrades.size,
+            onRunOnce = {
+                // For now, assume a fake BTC/MYR current price.
+                viewModel.runPaperStrategyOnce(fakeCurrentPrice = 250_000.0)
+            }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         Button(
             modifier = Modifier.fillMaxWidth(),
@@ -211,6 +224,65 @@ private fun RiskConfigCard(
                 text = "Live trading mode: ${if (liveTradingEnabled) "ON (future)" else "OFF / paper only"}",
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+    }
+}
+
+@Composable
+private fun StrategyCard(
+    lastDecision: String?,
+    lastSignal: String?,
+    openTradesCount: Int,
+    onRunOnce: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Strategy & Paper Trading",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Mode: PAPER ONLY (no real orders yet)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Open simulated trades: $openTradesCount",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Last decision: ${lastDecision ?: "—"}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = lastSignal ?: "No strategy run yet.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onRunOnce
+            ) {
+                Text(text = "Run Paper Strategy Once (Fake Price)")
+            }
         }
     }
 }
