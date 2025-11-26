@@ -92,6 +92,9 @@ dependencies {
     // OkHttp logging
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
+    // Retrofit Scalars converter (plain text / string responses)
+    implementation("com.squareup.retrofit2:converter-scalars:2.11.0")
+
     // Encrypted SharedPreferences
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }
