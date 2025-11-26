@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     // Compose Compiler Gradle plugin – required for Kotlin 2.x + Compose
-    // Version is provided on the classpath already (2.0.21), so we DO NOT specify it here.
+    // Version is already on the classpath (2.0.21), so we do NOT specify it here.
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -69,9 +69,13 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.5")
     implementation("androidx.activity:activity-compose:1.9.2")
+
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+
+    // Material icon set used by our bottom navigation (Home / Settings)
+    implementation("androidx.compose.material:material-icons-extended")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
