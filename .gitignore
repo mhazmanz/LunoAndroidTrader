@@ -1,3 +1,6 @@
+# ================
+# ANDROID / KOTLIN
+# ================
 *.iml
 .gradle
 /local.properties
@@ -8,8 +11,57 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+
+# Android Studio
+captures/
+.externalNativeBuild/
+caches/
+
+# Build folders
+build/
+app/build/
+*/build/
+
+# Gradle
+.gradle/
+**/gradle-wrapper.properties
+gradle-app.setting
+
+# Logs
+*.log
+
+# APK / AAB
+*.apk
+*.ap_
+*.aab
+
+# Signing keys (VERY IMPORTANT)
+*.keystore
+*.jks
+*.pem
+
+# Secret Configs (we will create secure configs later)
+secret.properties
+keys.properties
+
+# Local JVM settings
+.idea/jarRepositories.xml
+.idea/compiler.xml
+.idea/misc.xml
+
+# Kotlin
+kotlin/daemon/
+kotlin/daemon-client/
+
+# Play Store Files
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/metadata
+
+# Crashlytics / Firebase
+crashlytics.properties/
+crashlytics-build.properties
+
+# Symbolication
+native-symbols/
