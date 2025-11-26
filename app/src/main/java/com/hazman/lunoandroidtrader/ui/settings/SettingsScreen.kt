@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -32,7 +34,7 @@ import kotlinx.coroutines.launch
 /**
  * SettingsScreen:
  *
- * - API settings:
+ * - API & Telegram:
  *   - Luno read-only API key & secret
  *   - Telegram bot token & chat ID
  *   - Live trading toggle (for future)
@@ -41,17 +43,21 @@ import kotlinx.coroutines.launch
  *   - Risk per trade (% of equity)
  *   - Daily loss limit (% of starting-day equity)
  *   - Max trades per day
- *   - Cooldown minutes after loss
+ *   - Cooldown after loss (minutes)
  *
- * Provides test buttons for:
- *   - Test Luno connection (fetch balances)
- *   - Send Telegram test message
+ * - Actions:
+ *   - Save Settings
+ *   - Test Luno Connection
+ *   - Send Telegram Test
  */
 @Composable
 fun SettingsScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val storage = remember { AppStorage(context) }
     val coroutineScope = rememberCoroutineScope()
+
+    // Scroll state so content is scrollable on smaller screens
+    val scrollState = rememberScrollState()
 
     // API & Telegram state
     var lunoKey by remember { mutableStateOf("") }
@@ -60,7 +66,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     var telegramChatId by remember { mutableStateOf("") }
     var liveTradingEnabled by remember { mutableStateOf(false) }
 
-    // Risk settings state (we hold them as text for easier editing)
+    // Risk settings state (kept as text for editing)
     var riskPerTradePercentText by remember { mutableStateOf("1.0") }
     var dailyLossLimitPercentText by remember { mutableStateOf("5.0") }
     var maxTradesPerDayText by remember { mutableStateOf("10") }
@@ -85,6 +91,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(scrollState) // <--- ENABLE VERTICAL SCROLL
             .padding(16.dp),
         verticalArrangement = Arrangement.Top
     ) {
@@ -175,7 +182,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Text(
             text = "These values control how aggressively the bot will trade. " +
-                    "They do not guarantee profits, but they help limit risk.",
+                    "They do not guarantee profits, but they help define limits.",
             style = MaterialTheme.typography.bodySmall
         )
 
@@ -211,6 +218,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // --- COOLDOWN FIELD (this is the 4th risk setting) ---
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
             value = cooldownMinutesText,
@@ -221,7 +229,10 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Save button
+        // -------------
+        // SAVE SETTINGS
+        // -------------
+
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
@@ -242,7 +253,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 storage.setMaxTradesPerDay(maxTrades)
                 storage.setCooldownMinutesAfterLoss(cooldownMin)
 
-                // Normalize text fields in case user typed weird values
+                // Normalize text fields back to stored values
                 riskPerTradePercentText = riskPct.toString()
                 dailyLossLimitPercentText = dailyLossPct.toString()
                 maxTradesPerDayText = maxTrades.toString()
@@ -256,7 +267,10 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Test Luno connection
+        // -------------
+        // TEST BUTTONS
+        // -------------
+
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
@@ -285,7 +299,6 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Test Telegram
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
@@ -316,5 +329,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.secondary
             )
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
