@@ -14,9 +14,9 @@ import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
 
 /**
- * Luno API client (Phase 0: read-only test of /api/1/balance).
+ * Luno API client.
  *
- * We:
+ * Phase 0/1:
  * - Call /api/1/balance using Retrofit + Scalars converter (String response)
  * - Parse JSON manually using org.json
  * - Return List<LunoBalance> wrapped in Result
@@ -56,7 +56,7 @@ class LunoApiClient(
             .build()
 
         val retrofit = Retrofit.Builder()
-            .baseUrl("https://api.luno.com/") // Luno REST API base URL
+            .baseUrl("https://api.luno.com/")
             .client(httpClient)
             .addConverterFactory(ScalarsConverterFactory.create()) // we receive raw String
             .build()
@@ -65,13 +65,21 @@ class LunoApiClient(
     }
 
     /**
-     * Test call: fetch account balances using read-only key.
-     *
-     * Returns:
-     * - Result.success(list of balances) on success
-     * - Result.failure(exception) on error
+     * Public method to get balances for normal app logic.
      */
-    suspend fun testGetBalances(): Result<List<LunoBalance>> = withContext(Dispatchers.IO) {
+    suspend fun getBalances(): Result<List<LunoBalance>> =
+        fetchBalancesInternal()
+
+    /**
+     * Phase-0 test method used by Settings test button.
+     */
+    suspend fun testGetBalances(): Result<List<LunoBalance>> =
+        fetchBalancesInternal()
+
+    /**
+     * Internal implementation shared by getBalances() and testGetBalances().
+     */
+    private suspend fun fetchBalancesInternal(): Result<List<LunoBalance>> = withContext(Dispatchers.IO) {
         try {
             val key = storage.getLunoReadOnlyKey()
             val secret = storage.getLunoReadOnlySecret()
