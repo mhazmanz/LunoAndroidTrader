@@ -32,15 +32,20 @@ import kotlinx.coroutines.launch
 /**
  * SettingsScreen:
  *
- * - Allows user to input:
+ * - API settings:
  *   - Luno read-only API key & secret
  *   - Telegram bot token & chat ID
  *   - Live trading toggle (for future)
- * - Provides buttons to:
+ *
+ * - Risk settings:
+ *   - Risk per trade (% of equity)
+ *   - Daily loss limit (% of starting-day equity)
+ *   - Max trades per day
+ *   - Cooldown minutes after loss
+ *
+ * Provides test buttons for:
  *   - Test Luno connection (fetch balances)
  *   - Send Telegram test message
- *
- * All secrets are stored securely via AppStorage.
  */
 @Composable
 fun SettingsScreen(modifier: Modifier = Modifier) {
@@ -48,11 +53,18 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     val storage = remember { AppStorage(context) }
     val coroutineScope = rememberCoroutineScope()
 
+    // API & Telegram state
     var lunoKey by remember { mutableStateOf("") }
     var lunoSecret by remember { mutableStateOf("") }
     var telegramToken by remember { mutableStateOf("") }
     var telegramChatId by remember { mutableStateOf("") }
     var liveTradingEnabled by remember { mutableStateOf(false) }
+
+    // Risk settings state (we hold them as text for easier editing)
+    var riskPerTradePercentText by remember { mutableStateOf("1.0") }
+    var dailyLossLimitPercentText by remember { mutableStateOf("5.0") }
+    var maxTradesPerDayText by remember { mutableStateOf("10") }
+    var cooldownMinutesText by remember { mutableStateOf("30") }
 
     var statusMessage by remember { mutableStateOf("") }
 
@@ -63,6 +75,11 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         telegramToken = storage.getTelegramBotToken() ?: ""
         telegramChatId = storage.getTelegramChatId() ?: ""
         liveTradingEnabled = storage.isLiveTradingEnabled()
+
+        riskPerTradePercentText = storage.getRiskPerTradePercent().toString()
+        dailyLossLimitPercentText = storage.getDailyLossLimitPercent().toString()
+        maxTradesPerDayText = storage.getMaxTradesPerDay().toString()
+        cooldownMinutesText = storage.getCooldownMinutesAfterLoss().toString()
     }
 
     Column(
@@ -72,6 +89,10 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Top
     ) {
 
+        // -------------
+        // API SETTINGS
+        // -------------
+
         Text(
             text = "API & Telegram Settings",
             style = MaterialTheme.typography.titleLarge
@@ -79,7 +100,6 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Luno read-only key
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
             value = lunoKey,
@@ -101,7 +121,6 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Telegram
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
             value = telegramToken,
@@ -141,16 +160,94 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             )
         }
 
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // -------------
+        // RISK SETTINGS
+        // -------------
+
+        Text(
+            text = "Risk Settings",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "These values control how aggressively the bot will trade. " +
+                    "They do not guarantee profits, but they help limit risk.",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = riskPerTradePercentText,
+            onValueChange = { riskPerTradePercentText = it },
+            label = { Text("Risk Per Trade (%)") },
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = dailyLossLimitPercentText,
+            onValueChange = { dailyLossLimitPercentText = it },
+            label = { Text("Daily Loss Limit (%)") },
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = maxTradesPerDayText,
+            onValueChange = { maxTradesPerDayText = it },
+            label = { Text("Max Trades Per Day") },
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = cooldownMinutesText,
+            onValueChange = { cooldownMinutesText = it },
+            label = { Text("Cooldown After Loss (minutes)") },
+            singleLine = true
+        )
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // Save button
         Button(
             modifier = Modifier.fillMaxWidth(),
             onClick = {
+                // Save API settings
                 storage.setLunoReadOnlyKey(lunoKey.ifBlank { null })
                 storage.setLunoReadOnlySecret(lunoSecret.ifBlank { null })
                 storage.setTelegramBotToken(telegramToken.ifBlank { null })
                 storage.setTelegramChatId(telegramChatId.ifBlank { null })
+
+                // Parse and save risk settings safely
+                val riskPct = riskPerTradePercentText.toDoubleOrNull() ?: storage.getRiskPerTradePercent()
+                val dailyLossPct = dailyLossLimitPercentText.toDoubleOrNull() ?: storage.getDailyLossLimitPercent()
+                val maxTrades = maxTradesPerDayText.toIntOrNull() ?: storage.getMaxTradesPerDay()
+                val cooldownMin = cooldownMinutesText.toIntOrNull() ?: storage.getCooldownMinutesAfterLoss()
+
+                storage.setRiskPerTradePercent(riskPct)
+                storage.setDailyLossLimitPercent(dailyLossPct)
+                storage.setMaxTradesPerDay(maxTrades)
+                storage.setCooldownMinutesAfterLoss(cooldownMin)
+
+                // Normalize text fields in case user typed weird values
+                riskPerTradePercentText = riskPct.toString()
+                dailyLossLimitPercentText = dailyLossPct.toString()
+                maxTradesPerDayText = maxTrades.toString()
+                cooldownMinutesText = cooldownMin.toString()
+
                 statusMessage = "Settings saved."
             }
         ) {
