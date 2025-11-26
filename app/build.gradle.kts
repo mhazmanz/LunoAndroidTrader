@@ -1,6 +1,9 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    // Compose Compiler Gradle plugin – required for Kotlin 2.x + Compose
+    // Version is provided on the classpath already (2.0.21), so we DO NOT specify it here.
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -43,9 +46,13 @@ android {
         compose = true
     }
 
+    // When using the Compose Compiler Gradle plugin, this block is optional.
+    // The plugin will choose a compatible compiler version automatically.
+    /*
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.3"
     }
+    */
 
     packaging {
         resources {
