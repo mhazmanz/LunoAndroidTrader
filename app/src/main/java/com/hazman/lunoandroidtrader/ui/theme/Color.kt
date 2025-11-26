@@ -2,10 +2,21 @@ package com.hazman.lunoandroidtrader.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+/**
+ * Color definitions for the Luno Android Trading Bot.
+ *
+ * We keep this simple for now and can refine later.
+ */
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+val TealPrimary = Color(0xFF00C48C)
+val BlueSecondary = Color(0xFF4C6FFF)
+
+val DarkBackground = Color(0xFF050608)
+val DarkSurface = Color(0xFF111827)
+val DarkOnSurface = Color(0xFFE5E7EB)
+val DarkOnBackground = Color(0xFFE4E4E7)
+
+val LightBackground = Color(0xFFF3F4F6)
+val LightSurface = Color(0xFFFFFFFF)
+val LightOnSurface = Color(0xFF111827)
+val LightOnBackground = Color(0xFF111827)

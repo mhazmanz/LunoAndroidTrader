@@ -8,37 +8,41 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 /**
- * App-wide color definitions and theme setup for the Luno Android Trading Bot.
+ * App-wide theme for the Luno Android Trading Bot.
  *
- * This will give the app a professional dark-friendly look suitable for trading.
- * We can refine colors later if needed.
+ * This wraps all UI in a consistent Material3 theme with dark/light support.
  */
 
-// Basic color definitions (can be refined later)
+// Simple helper colors for text on primary/secondary.
+private val ColorWhite = Color(0xFFFFFFFF)
+private val ColorBlack = Color(0xFF000000)
+
+// Dark theme color scheme
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF00C48C),      // Teal-like primary
-    onPrimary = Color(0xFF000000),
-    secondary = Color(0xFF4C6FFF),    // Blue-ish accent
-    onSecondary = Color(0xFFFFFFFF),
-    background = Color(0xFF050608),   // Dark background
-    onBackground = Color(0xFFE4E4E7),
-    surface = Color(0xFF111827),
-    onSurface = Color(0xFFE5E7EB),
+    primary = TealPrimary,
+    onPrimary = ColorBlack,
+    secondary = BlueSecondary,
+    onSecondary = ColorWhite,
+    background = DarkBackground,
+    onBackground = DarkOnBackground,
+    surface = DarkSurface,
+    onSurface = DarkOnSurface,
 )
 
+// Light theme color scheme
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF0077FF),
-    onPrimary = Color(0xFFFFFFFF),
-    secondary = Color(0xFF00C48C),
-    onSecondary = Color(0xFF000000),
-    background = Color(0xFFF3F4F6),
-    onBackground = Color(0xFF111827),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF111827),
+    primary = BlueSecondary,
+    onPrimary = ColorWhite,
+    secondary = TealPrimary,
+    onSecondary = ColorBlack,
+    background = LightBackground,
+    onBackground = LightOnBackground,
+    surface = LightSurface,
+    onSurface = LightOnSurface,
 )
 
 /**
- * Root theme composable. Wraps all UI content.
+ * Root theme composable. Wrap this around all Composables in setContent.
  *
  * Usage:
  * LunoAndroidTraderTheme {
@@ -58,24 +62,7 @@ fun LunoAndroidTraderTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography, // we will define Typography below
-        shapes = Shapes,         // and Shapes below
+        typography = Typography, // from Type.kt
         content = content
     )
 }
-
-/**
- * Simple typography setup.
- * For now, we use Material defaults. We can customise later if necessary.
- */
-import androidx.compose.material3.Typography
-
-val Typography = Typography()
-
-/**
- * Simple shapes setup.
- * We can customise corner radii and more later if we want.
- */
-import androidx.compose.material3.Shapes
-
-val Shapes = Shapes()
