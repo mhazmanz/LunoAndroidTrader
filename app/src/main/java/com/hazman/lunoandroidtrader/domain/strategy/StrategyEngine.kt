@@ -7,6 +7,7 @@ import com.hazman.lunoandroidtrader.domain.model.RiskConfig
 import com.hazman.lunoandroidtrader.domain.trading.ClosedTrade
 import com.hazman.lunoandroidtrader.domain.trading.PaperTradingEngine
 import com.hazman.lunoandroidtrader.domain.trading.PaperUpdateResult
+import com.hazman.lunoandroidtrader.domain.trading.PerformanceSnapshot
 import kotlin.math.roundToInt
 
 /**
@@ -30,6 +31,10 @@ data class StrategyRunResult(
  *  - [PaperTradingEngine] trade lifecycle and P&L
  *
  * It is called once per "tick" (in this app, once per fake or live candle).
+ *
+ * NEW (this step):
+ *  - Exposes closed-trade history and performance snapshot, so UI can render
+ *    a dedicated "Trade History / Performance" screen or section.
  */
 class StrategyEngine(
     private val simpleStrategy: SimpleStrategy,
@@ -41,9 +46,9 @@ class StrategyEngine(
     /**
      * Main entry point: run the strategy on a single candle.
      *
-     * @param candle         New candle to process.
+     * @param candle          New candle to process.
      * @param accountSnapshot Current account snapshot (for sizing & risk).
-     * @param riskConfig     Current risk configuration.
+     * @param riskConfig      Current risk configuration.
      */
     fun runOnce(
         candle: PriceCandle,
@@ -102,6 +107,41 @@ class StrategyEngine(
     fun snapshotOpenTrades(): List<SimulatedTrade> = paperTradingEngine.snapshotOpenTrades()
 
     /**
+     * Snapshot of closed trades across the entire session.
+     *
+     * @param limit Optional max number of trades (most recent) to return.
+     */
+    fun snapshotClosedTrades(limit: Int? = null): List<ClosedTrade> =
+        paperTradingEngine.snapshotClosedTrades(limit)
+
+    /**
+     * Snapshot of performance stats across the entire session.
+     *
+     * Useful for:
+     *  - A dedicated "Performance" card
+     *  - A Trade History screen header
+     *  - Deciding when to reset the paper session
+     */
+    fun snapshotPerformance(): PerformanceSnapshot =
+        paperTradingEngine.snapshotPerformance()
+
+    /**
+     * Convenience: expose total realized P&L directly.
+     */
+    fun totalRealizedPnlMyr(): Double = paperTradingEngine.getTotalRealizedPnlMyr()
+
+    /**
+     * Optional: reset the paper session and candle history.
+     *
+     * Later we can wire this to a "Reset Paper Trading" button in Settings or
+     * on the Dashboard.
+     */
+    fun resetSession() {
+        candleHistory.clear()
+        paperTradingEngine.resetSession()
+    }
+
+    /**
      * Build a readable explanation string for the last run, suitable for the UI.
      */
     private fun buildHumanSignal(
@@ -122,7 +162,8 @@ class StrategyEngine(
             sb.append("Closed trades this run: ${updateResult.closedTrades.size}.\n")
             updateResult.closedTrades.forEach { closed ->
                 sb.append(
-                    " - ${closed.trade.pair} ${closed.reason} @ ${closed.closePrice.round2()} | " +
+                    " - ${closed.trade.pair} ${closed.reason} @ " +
+                            "${closed.closePrice.round2()} | " +
                             "PnL: ${closed.pnlMyr.round2()} MYR.\n"
                 )
             }
@@ -138,9 +179,12 @@ class StrategyEngine(
             )
         }
 
+        val performance = paperTradingEngine.snapshotPerformance()
         sb.append(
             "Open simulated trades: ${updateResult.openTrades.size}. " +
-                    "Total realized P&L (paper): ${updateResult.totalRealizedPnlMyr.round2()} MYR."
+                    "Total realized P&L (paper): ${performance.totalRealizedPnlMyr.round2()} MYR. " +
+                    "Closed trades: ${performance.totalClosedTrades}, " +
+                    "Win rate: ${performance.winRatePercent.round2()}%."
         )
 
         return sb.toString()

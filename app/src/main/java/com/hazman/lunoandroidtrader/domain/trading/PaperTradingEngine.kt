@@ -8,6 +8,7 @@ import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
 import com.hazman.lunoandroidtrader.domain.risk.RiskDecision
 import com.hazman.lunoandroidtrader.domain.risk.RiskManager
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -31,6 +32,17 @@ data class ClosedTrade(
 )
 
 /**
+ * Performance snapshot across the entire paper session.
+ */
+data class PerformanceSnapshot(
+    val totalRealizedPnlMyr: Double,
+    val totalClosedTrades: Int,
+    val winningTrades: Int,
+    val losingTrades: Int,
+    val winRatePercent: Double
+)
+
+/**
  * Result of updating open trades with a new candle.
  */
 data class PaperUpdateResult(
@@ -46,13 +58,25 @@ data class PaperUpdateResult(
  *  - Tracks total realized P&L in MYR.
  *
  * This engine is pure-paper: it never touches real Luno accounts.
+ *
+ * NEW (this step):
+ *  - Keeps a full in-memory history of all closed trades in [closedTradesHistory].
+ *  - Provides [snapshotClosedTrades] and [snapshotPerformance] for UI layers.
  */
 class PaperTradingEngine(
     private val riskManager: RiskManager
 ) {
 
+    // All currently open simulated trades.
     private val openTrades = mutableListOf<SimulatedTrade>()
+
+    // Full closed trade history for this app session.
+    private val closedTradesHistory = mutableListOf<ClosedTrade>()
+
+    // Aggregate realized P&L across the entire paper session.
     private var totalRealizedPnlMyr: Double = 0.0
+
+    // Simple incrementing ID for trades.
     private var nextTradeId: Long = 1L
 
     /**
@@ -61,12 +85,87 @@ class PaperTradingEngine(
     fun snapshotOpenTrades(): List<SimulatedTrade> = openTrades.map { it.copy() }
 
     /**
+     * Get a snapshot of closed trades history.
+     *
+     * @param limit Optional max number of recent trades to return.
+     *              If null, returns the full history.
+     */
+    fun snapshotClosedTrades(limit: Int? = null): List<ClosedTrade> {
+        if (closedTradesHistory.isEmpty()) return emptyList()
+        val copy = closedTradesHistory.toList()
+        return if (limit == null || limit <= 0 || limit >= copy.size) {
+            copy
+        } else {
+            copy.takeLast(limit)
+        }
+    }
+
+    /**
+     * Get a performance snapshot across the entire paper session.
+     */
+    fun snapshotPerformance(): PerformanceSnapshot {
+        val closed = closedTradesHistory
+        if (closed.isEmpty()) {
+            return PerformanceSnapshot(
+                totalRealizedPnlMyr = 0.0,
+                totalClosedTrades = 0,
+                winningTrades = 0,
+                losingTrades = 0,
+                winRatePercent = 0.0
+            )
+        }
+
+        var wins = 0
+        var losses = 0
+
+        for (ct in closed) {
+            if (ct.pnlMyr > 0.0) {
+                wins++
+            } else if (ct.pnlMyr < 0.0) {
+                losses++
+            }
+        }
+
+        val total = closed.size
+        val winRate = if (total > 0) {
+            wins.toDouble() / total.toDouble() * 100.0
+        } else {
+            0.0
+        }
+
+        return PerformanceSnapshot(
+            totalRealizedPnlMyr = totalRealizedPnlMyr,
+            totalClosedTrades = total,
+            winningTrades = wins,
+            losingTrades = losses,
+            winRatePercent = winRate
+        )
+    }
+
+    /**
+     * Fully reset the paper engine state.
+     *
+     * This is useful if you add a "Reset paper session" button later.
+     */
+    fun resetSession() {
+        openTrades.clear()
+        closedTradesHistory.clear()
+        totalRealizedPnlMyr = 0.0
+        nextTradeId = 1L
+    }
+
+    /**
+     * For convenience, expose the current total realized P&L.
+     */
+    fun getTotalRealizedPnlMyr(): Double = totalRealizedPnlMyr
+
+    /**
      * Try to open a LONG trade on the given pair using the candle close as entry.
      *
      * Risk model:
      *  - Risk per trade (MYR) = equity * riskPerTradePercent / 100.
      *  - Stop loss = entryPrice * (1 - BASE_SL_PCT).
-     *  - Take profit = entryPrice * (1 + 2 * BASE_SL_PCT). (2R target)
+     *  - Take profit = entryPrice * (1 + 2 * BASE_SL_PCT). (≈2R target)
      *  - Quantity (base) = riskAmountMyr / (entryPrice - stopLossPrice).
      *
      * If risk checks fail, returns null.
@@ -189,8 +288,7 @@ class PaperTradingEngine(
                 closePrice = trade.takeProfitPrice
             }
 
-            // For LONG:
-            val pnlMyr = (closePrice - trade.entryPrice) * trade.quantityBase
+            val pnlMyr = computePnlMyr(trade = trade, closePrice = closePrice)
             totalRealizedPnlMyr += pnlMyr
 
             iterator.remove()
@@ -203,6 +301,7 @@ class PaperTradingEngine(
                 reason = reason
             )
             closedTrades.add(closed)
+            closedTradesHistory.add(closed)
 
             riskManager.registerClosedTrade(
                 pnlMyr = pnlMyr,
@@ -215,5 +314,28 @@ class PaperTradingEngine(
             openTrades = snapshotOpenTrades(),
             totalRealizedPnlMyr = totalRealizedPnlMyr
         )
+    }
+
+    /**
+     * Compute P&L for a given trade at a specific close price.
+     *
+     * For now we only open LONGs, so this is straightforward:
+     *  - LONG PnL = (close - entry) * quantityBase
+     *  - (If SHORTs are added later, we handle them here.)
+     */
+    private fun computePnlMyr(
+        trade: SimulatedTrade,
+        closePrice: Double
+    ): Double {
+        return when (trade.direction) {
+            TradeDirection.LONG -> (closePrice - trade.entryPrice) * trade.quantityBase
+            TradeDirection.SHORT -> (trade.entryPrice - closePrice) * trade.quantityBase
+        }
+    }
+
+    // Defensive utility, may be useful later if we clamp or validate anything.
+    @Suppress("unused")
+    private fun Double.isInvalidNumber(): Boolean {
+        return !this.isFinite() || abs(this) > 1e12
     }
 }
