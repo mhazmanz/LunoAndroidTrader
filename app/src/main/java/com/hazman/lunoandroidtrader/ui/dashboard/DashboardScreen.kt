@@ -37,9 +37,13 @@ import kotlin.math.roundToInt
  *      - Refresh data
  *      - Run paper strategy once with a fake price
  *      - Run paper strategy once using live Luno ticker (XBTMYR)
+ *
+ * The [modifier] parameter allows hosting activities to control padding, sizing, etc.
  */
 @Composable
-fun DashboardScreen() {
+fun DashboardScreen(
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     val appStorage = remember { AppStorage(context) }
     val viewModel: DashboardViewModel = viewModel(
@@ -53,7 +57,7 @@ fun DashboardScreen() {
     }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
             .verticalScroll(rememberScrollState()),
