@@ -26,6 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hazman.lunoandroidtrader.data.local.AppStorage
+import com.hazman.lunoandroidtrader.data.notifications.AppNotificationDispatcher
+import com.hazman.lunoandroidtrader.data.telegram.TelegramClient
 import kotlin.math.roundToInt
 
 /**
@@ -38,7 +40,8 @@ import kotlin.math.roundToInt
  *      - Run paper strategy once with a fake price
  *      - Run paper strategy once using live Luno ticker (XBTMYR)
  *
- * The [modifier] parameter allows hosting activities to control padding, sizing, etc.
+ * If Telegram is not configured, trade-open signals are delivered as
+ * local Android notifications instead.
  */
 @Composable
 fun DashboardScreen(
@@ -46,8 +49,20 @@ fun DashboardScreen(
 ) {
     val context = LocalContext.current
     val appStorage = remember { AppStorage(context) }
+    val notificationDispatcher = remember {
+        val telegramClient = TelegramClient(appStorage)
+        AppNotificationDispatcher(
+            context = context.applicationContext,
+            storage = appStorage,
+            telegramClient = telegramClient
+        )
+    }
+
     val viewModel: DashboardViewModel = viewModel(
-        factory = DashboardViewModelFactory(appStorage)
+        factory = DashboardViewModelFactory(
+            appStorage = appStorage,
+            notificationDispatcher = notificationDispatcher
+        )
     )
 
     val uiState by viewModel.uiState.collectAsState()

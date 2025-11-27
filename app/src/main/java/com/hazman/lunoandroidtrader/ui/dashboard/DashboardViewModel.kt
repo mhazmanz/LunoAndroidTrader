@@ -10,6 +10,7 @@ import com.hazman.lunoandroidtrader.data.luno.LunoPublicService
 import com.hazman.lunoandroidtrader.domain.market.PriceCandle
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
+import com.hazman.lunoandroidtrader.domain.notifications.NotificationDispatcher
 import com.hazman.lunoandroidtrader.domain.risk.RiskManager
 import com.hazman.lunoandroidtrader.domain.strategy.SimpleStrategy
 import com.hazman.lunoandroidtrader.domain.strategy.StrategyEngine
@@ -26,15 +27,15 @@ import kotlin.math.roundToInt
  * - Loading RiskConfig from AppStorage
  * - Asking RiskManager for max risk per trade
  * - Delegating per-candle decisions to StrategyEngine
- *
- * It exposes a DashboardUiState that the Compose UI observes.
+ * - Dispatching notifications via NotificationDispatcher when trades open
  */
 class DashboardViewModel(
     private val accountRepository: AccountRepository,
     private val storage: AppStorage,
     private val riskManager: RiskManager,
     private val strategyEngine: StrategyEngine,
-    private val lunoPublicService: LunoPublicService
+    private val lunoPublicService: LunoPublicService,
+    private val notificationDispatcher: NotificationDispatcher
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -42,8 +43,6 @@ class DashboardViewModel(
 
     /**
      * Refresh account + risk configuration from data sources.
-     * This should be called when the screen is first shown and
-     * also when the user explicitly refreshes.
      */
     fun refresh() {
         _uiState.value = _uiState.value.copy(
@@ -68,9 +67,7 @@ class DashboardViewModel(
                         riskConfig = riskConfig,
                         maxRiskPerTradeMyr = maxRiskMyr,
                         errorMessage = null,
-                        // Keep open trades in sync with whatever the engine currently holds
                         openSimulatedTrades = strategyEngine.snapshotOpenTrades(),
-                        // Preserve previous decision/signal so they don't get wiped on refresh
                         lastStrategyDecision = _uiState.value.lastStrategyDecision,
                         lastSimulatedSignal = _uiState.value.lastSimulatedSignal
                     )
@@ -92,9 +89,6 @@ class DashboardViewModel(
     /**
      * Phase 1 legacy function:
      * Simulate a candle around a provided "fake" current price.
-     *
-     * We keep this intentionally for testing and comparison,
-     * even after we introduce live prices from Luno.
      */
     fun runPaperStrategyOnce(fakeCurrentPrice: Double) {
         val currentState = _uiState.value
@@ -144,6 +138,21 @@ class DashboardViewModel(
             lastSimulatedSignal = "Fake price run @ RM ${fakeCurrentPrice.roundTwo()}.\n" + result.humanSignal,
             openSimulatedTrades = result.openTrades
         )
+
+        // If a new simulated trade was opened, send a notification.
+        result.newlyOpenedTrade?.let {
+            val message = buildString {
+                append("Simulated LONG opened (Fake price run).\n")
+                append("Pair: ${it.pair}\n")
+                append("Entry: ${it.entryPrice.roundTwo()}, ")
+                append("SL: ${it.stopLossPrice.roundTwo()}, ")
+                append("TP: ${it.takeProfitPrice.roundTwo()}\n")
+                append("Risk per trade: RM ${it.riskAmountMyr.roundTwo()}")
+            }
+            viewModelScope.launch {
+                notificationDispatcher.notifySignal(message)
+            }
+        }
     }
 
     /**
@@ -247,6 +256,19 @@ class DashboardViewModel(
                 },
                 openSimulatedTrades = result.openTrades
             )
+
+            // If a new simulated trade was opened, send a notification.
+            result.newlyOpenedTrade?.let {
+                val message = buildString {
+                    append("Simulated LONG opened (Live price run).\n")
+                    append("Pair: ${it.pair}\n")
+                    append("Entry: ${it.entryPrice.roundTwo()}, ")
+                    append("SL: ${it.stopLossPrice.roundTwo()}, ")
+                    append("TP: ${it.takeProfitPrice.roundTwo()}\n")
+                    append("Risk per trade: RM ${it.riskAmountMyr.roundTwo()}")
+                }
+                notificationDispatcher.notifySignal(message)
+            }
         }
     }
 
@@ -297,12 +319,10 @@ data class DashboardUiState(
 
 /**
  * Factory to create DashboardViewModel with the proper dependencies.
- *
- * This keeps the wiring in one place and avoids leaking any Android
- * or DI concerns into the pure domain layer.
  */
 class DashboardViewModelFactory(
-    private val appStorage: AppStorage
+    private val appStorage: AppStorage,
+    private val notificationDispatcher: NotificationDispatcher
 ) : ViewModelProvider.Factory {
 
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -324,7 +344,8 @@ class DashboardViewModelFactory(
                 storage = appStorage,
                 riskManager = riskManager,
                 strategyEngine = strategyEngine,
-                lunoPublicService = lunoPublicService
+                lunoPublicService = lunoPublicService,
+                notificationDispatcher = notificationDispatcher
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

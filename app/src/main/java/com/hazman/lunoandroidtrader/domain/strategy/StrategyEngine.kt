@@ -10,15 +10,15 @@ import kotlin.math.roundToInt
 /**
  * Result of a single strategy evaluation + (simulated) execution step.
  *
- * This is a pure domain object – the UI layer consumes it to display:
- * - a short label (decisionLabel),
- * - a human-readable explanation (humanSignal),
- * - the current set of open simulated trades (openTrades).
+ * newlyOpenedTrade:
+ *  - is null when no new trade was opened in this step
+ *  - is the SimulatedTrade that was just opened (if any)
  */
 data class StrategyEngineResult(
     val decisionLabel: String,
     val humanSignal: String,
-    val openTrades: List<SimulatedTrade>
+    val openTrades: List<SimulatedTrade>,
+    val newlyOpenedTrade: SimulatedTrade? = null
 )
 
 /**
@@ -58,7 +58,8 @@ class StrategyEngine(
                 StrategyEngineResult(
                     decisionLabel = "NoTrade",
                     humanSignal = "Strategy decided: No trade for this candle.",
-                    openTrades = paperTradingEngine.getOpenTrades()
+                    openTrades = paperTradingEngine.getOpenTrades(),
+                    newlyOpenedTrade = null
                 )
             }
 
@@ -83,14 +84,16 @@ class StrategyEngine(
                                 append("TP: ${trade.takeProfitPrice.roundTwo()}\n")
                                 append("Risk per trade: RM ${trade.riskAmountMyr.roundTwo()}")
                             },
-                            openTrades = paperTradingEngine.getOpenTrades()
+                            openTrades = paperTradingEngine.getOpenTrades(),
+                            newlyOpenedTrade = trade
                         )
                     },
                     onFailure = { e ->
                         StrategyEngineResult(
                             decisionLabel = "OpenLongFailed",
                             humanSignal = "Failed to open simulated trade: ${e.message ?: "Unknown error"}",
-                            openTrades = paperTradingEngine.getOpenTrades()
+                            openTrades = paperTradingEngine.getOpenTrades(),
+                            newlyOpenedTrade = null
                         )
                     }
                 )
