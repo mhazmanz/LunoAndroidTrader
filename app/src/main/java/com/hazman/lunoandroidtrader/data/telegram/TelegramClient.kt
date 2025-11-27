@@ -39,7 +39,8 @@ class TelegramClient(
         val chatId = storage.getTelegramChatId()?.trim().orEmpty()
 
         if (token.isEmpty() || chatId.isEmpty()) {
-            // No configuration – signal failure so caller can fall back to local notification
+            // No configuration – signal failure so callers (e.g. AppNotificationDispatcher)
+            // can fall back to local notification.
             return@withContext Result.failure(
                 IllegalStateException("Telegram token or chat ID is not configured.")
             )
@@ -108,25 +109,11 @@ class TelegramClient(
      *
      * - Uses the existing stored token + chat ID.
      * - Sends a fixed diagnostic message.
-     * - Calls [onSuccess] on success, [onError] with a human-readable message on failure.
      *
-     * This is suspend because it performs network I/O; call it from a coroutine
-     * (e.g. inside rememberCoroutineScope().launch { ... }).
+     * Callers (like SettingsScreen) expect a Result<Unit> and typically call .fold(...)
+     * on it to update the UI.
      */
-    suspend fun sendTestMessage(
-        onSuccess: () -> Unit,
-        onError: (String) -> Unit
-    ) {
-        val result = sendMessage("Test message from Luno Android Trader ✅")
-
-        result.fold(
-            onSuccess = {
-                onSuccess()
-            },
-            onFailure = { e ->
-                val msg = e.message ?: e::class.java.simpleName ?: "Unknown error"
-                onError("Failed to send Telegram test message: $msg")
-            }
-        )
+    suspend fun sendTestMessage(): Result<Unit> {
+        return sendMessage("Test message from Luno Android Trader ✅")
     }
 }
