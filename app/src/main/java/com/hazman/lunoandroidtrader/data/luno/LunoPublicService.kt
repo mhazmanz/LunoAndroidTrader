@@ -1,6 +1,7 @@
 package com.hazman.lunoandroidtrader.data.luno
 
 import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -17,9 +18,10 @@ import java.util.concurrent.TimeUnit
 interface LunoPublicService {
 
     /**
-     * GET /api/1/ticker?pair=XXXYYY
+     * GET /api/1/ticker
      *
-     * Latest ticker indicators for a single currency pair.
+     * Returns the latest ticker information for a specific trading pair,
+     * e.g. "XBTMYR", "ETHMYR".
      */
     @GET("api/1/ticker")
     suspend fun getTicker(
@@ -37,38 +39,45 @@ interface LunoPublicService {
 
     companion object {
 
-        // We keep a single shared instance for the whole app.
+        // Single shared instance for the whole app.
         @Volatile
         private var INSTANCE: LunoPublicService? = null
 
         fun getInstance(): LunoPublicService {
             val existing = INSTANCE
-            if (existing != null) {
-                return existing
-            }
+            if (existing != null) return existing
 
-            synchronized(this) {
+            return synchronized(this) {
                 val again = INSTANCE
                 if (again != null) {
-                    return again
+                    again
+                } else {
+                    val client = buildOkHttpClient()
+                    val retrofit = Retrofit.Builder()
+                        .baseUrl("https://api.luno.com/") // Official Luno REST base URL
+                        .client(client)
+                        .addConverterFactory(GsonConverterFactory.create())
+                        .build()
+
+                    val created = retrofit.create(LunoPublicService::class.java)
+                    INSTANCE = created
+                    created
                 }
-
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .writeTimeout(15, TimeUnit.SECONDS)
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("https://api.luno.com/") // Official Luno REST base URL
-                    .client(client)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-
-                val created = retrofit.create(LunoPublicService::class.java)
-                INSTANCE = created
-                return created
             }
+        }
+
+        private fun buildOkHttpClient(): OkHttpClient {
+            val logging = HttpLoggingInterceptor().apply {
+                // For production, you can drop this to BASIC or NONE.
+                level = HttpLoggingInterceptor.Level.BASIC
+            }
+
+            return OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .addInterceptor(logging)
+                .build()
         }
     }
 }

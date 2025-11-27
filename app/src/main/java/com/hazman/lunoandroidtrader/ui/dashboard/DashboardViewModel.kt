@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.hazman.lunoandroidtrader.data.account.AccountRepository
 import com.hazman.lunoandroidtrader.data.local.AppStorage
 import com.hazman.lunoandroidtrader.data.luno.LunoApiClient
+import com.hazman.lunoandroidtrader.data.luno.LunoPublicService
 import com.hazman.lunoandroidtrader.domain.market.PriceCandle
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * DashboardViewModel orchestrates:
@@ -31,7 +33,8 @@ class DashboardViewModel(
     private val accountRepository: AccountRepository,
     private val storage: AppStorage,
     private val riskManager: RiskManager,
-    private val strategyEngine: StrategyEngine
+    private val strategyEngine: StrategyEngine,
+    private val lunoPublicService: LunoPublicService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -87,15 +90,11 @@ class DashboardViewModel(
     }
 
     /**
-     * Phase 1:
-     * For now we simulate a candle around a provided "fake" current price,
-     * then:
-     *  - pass the candle + account + riskConfig into StrategyEngine
-     *  - let StrategyEngine decide whether to open a paper trade
-     *  - update the UI state with the result
+     * Phase 1 legacy function:
+     * Simulate a candle around a provided "fake" current price.
      *
-     * Later we will replace fakeCurrentPrice with real data from Luno
-     * (ticker or OHLC) and possibly run on a timer / background worker.
+     * We keep this intentionally for testing and comparison,
+     * even after we introduce live prices from Luno.
      */
     fun runPaperStrategyOnce(fakeCurrentPrice: Double) {
         val currentState = _uiState.value
@@ -142,9 +141,113 @@ class DashboardViewModel(
 
         _uiState.value = _uiState.value.copy(
             lastStrategyDecision = result.decisionLabel,
-            lastSimulatedSignal = result.humanSignal,
+            lastSimulatedSignal = "Fake price run @ RM ${fakeCurrentPrice.roundTwo()}.\n" + result.humanSignal,
             openSimulatedTrades = result.openTrades
         )
+    }
+
+    /**
+     * New function:
+     * Fetch a live ticker from Luno for the given pair (default XBTMYR),
+     * construct a synthetic candle around that real price,
+     * and run it through the StrategyEngine.
+     */
+    fun runPaperStrategyOnceWithLivePrice(pair: String = "XBTMYR") {
+        val currentState = _uiState.value
+        val account = currentState.accountSnapshot
+        val riskConfig = currentState.riskConfig
+
+        if (account == null || riskConfig == null) {
+            _uiState.value = currentState.copy(
+                lastSimulatedSignal = "Cannot run strategy – account or risk config is not loaded."
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = "FetchingTicker",
+                lastSimulatedSignal = "Fetching live ticker for $pair…"
+            )
+
+            val tickerResponse = try {
+                lunoPublicService.getTicker(pair)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    lastStrategyDecision = "TickerError",
+                    lastSimulatedSignal = "Error fetching ticker for $pair: ${e.message ?: "Unknown error"}"
+                )
+                return@launch
+            }
+
+            if (!tickerResponse.isSuccessful) {
+                _uiState.value = _uiState.value.copy(
+                    lastStrategyDecision = "TickerError",
+                    lastSimulatedSignal = "Ticker request failed for $pair. HTTP ${tickerResponse.code()}."
+                )
+                return@launch
+            }
+
+            val ticker = tickerResponse.body()
+            if (ticker == null) {
+                _uiState.value = _uiState.value.copy(
+                    lastStrategyDecision = "TickerError",
+                    lastSimulatedSignal = "No ticker body returned for $pair."
+                )
+                return@launch
+            }
+
+            val basePrice = ticker.lastTrade?.toDoubleOrNull()
+                ?: ticker.bid?.toDoubleOrNull()
+                ?: ticker.ask?.toDoubleOrNull()
+
+            if (basePrice == null) {
+                _uiState.value = _uiState.value.copy(
+                    lastStrategyDecision = "TickerError",
+                    lastSimulatedSignal = "Ticker for $pair did not contain a usable numeric price."
+                )
+                return@launch
+            }
+
+            // Build a candle around the live price (simple synthetic range).
+            val open = basePrice * 0.999
+            val close = basePrice * 1.001
+            val high = maxOf(open, close) * 1.0005
+            val low = minOf(open, close) * 0.9995
+
+            val candle = PriceCandle(
+                timestampMillis = ticker.timestamp ?: System.currentTimeMillis(),
+                open = open,
+                high = high,
+                low = low,
+                close = close,
+                volume = ticker.rolling24hVolume?.toDoubleOrNull() ?: 1.0
+            )
+
+            val result = try {
+                strategyEngine.runOnce(
+                    candle = candle,
+                    accountSnapshot = account,
+                    riskConfig = riskConfig
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    lastStrategyDecision = "Error",
+                    lastSimulatedSignal = "Error while running strategy on live price: ${e.message ?: "Unknown error"}",
+                    openSimulatedTrades = strategyEngine.snapshotOpenTrades()
+                )
+                return@launch
+            }
+
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = result.decisionLabel,
+                lastSimulatedSignal = buildString {
+                    append("Live $pair price ≈ RM ${basePrice.roundTwo()}.\n")
+                    append(result.humanSignal)
+                },
+                openSimulatedTrades = result.openTrades
+            )
+        }
     }
 
     /**
@@ -164,6 +267,15 @@ class DashboardViewModel(
             cooldownMinutesAfterLoss = cooldownMin,
             liveTradingEnabled = liveTrading
         )
+    }
+
+    /**
+     * Local rounding helper, formatting to 2 decimal places and using
+     * a grouped/locale-friendly format (e.g. "12,345.67").
+     */
+    private fun Double.roundTwo(): String {
+        val value = (this * 100.0).roundToInt() / 100.0
+        return "%,.2f".format(value)
     }
 }
 
@@ -204,13 +316,15 @@ class DashboardViewModelFactory(
                 simpleStrategy = simpleStrategy,
                 paperTradingEngine = paperTradingEngine
             )
+            val lunoPublicService = LunoPublicService.getInstance()
 
             @Suppress("UNCHECKED_CAST")
             return DashboardViewModel(
                 accountRepository = accountRepository,
                 storage = appStorage,
                 riskManager = riskManager,
-                strategyEngine = strategyEngine
+                strategyEngine = strategyEngine,
+                lunoPublicService = lunoPublicService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
