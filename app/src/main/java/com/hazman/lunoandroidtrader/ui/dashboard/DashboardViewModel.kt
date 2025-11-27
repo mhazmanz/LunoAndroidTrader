@@ -11,28 +11,27 @@ import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
 import com.hazman.lunoandroidtrader.domain.risk.RiskManager
 import com.hazman.lunoandroidtrader.domain.strategy.SimpleStrategy
-import com.hazman.lunoandroidtrader.domain.strategy.StrategyDecision
+import com.hazman.lunoandroidtrader.domain.strategy.StrategyEngine
 import com.hazman.lunoandroidtrader.domain.trading.PaperTradingEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
-import kotlin.math.round
 
 /**
  * DashboardViewModel orchestrates:
- * - Loading account snapshot from AccountRepository
- * - Loading risk config from AppStorage
- * - Using RiskManager to compute risk-related metrics
- * - Running a simple paper-trading strategy + engine
+ * - Loading the account snapshot from AccountRepository
+ * - Loading RiskConfig from AppStorage
+ * - Asking RiskManager for max risk per trade
+ * - Delegating per-candle decisions to StrategyEngine
+ *
+ * It exposes a DashboardUiState that the Compose UI observes.
  */
 class DashboardViewModel(
     private val accountRepository: AccountRepository,
     private val storage: AppStorage,
     private val riskManager: RiskManager,
-    private val tradingEngine: PaperTradingEngine,
-    private val strategy: SimpleStrategy
+    private val strategyEngine: StrategyEngine
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -40,6 +39,8 @@ class DashboardViewModel(
 
     /**
      * Refresh account + risk configuration from data sources.
+     * This should be called when the screen is first shown and
+     * also when the user explicitly refreshes.
      */
     fun refresh() {
         _uiState.value = _uiState.value.copy(
@@ -64,8 +65,9 @@ class DashboardViewModel(
                         riskConfig = riskConfig,
                         maxRiskPerTradeMyr = maxRiskMyr,
                         errorMessage = null,
-                        // update open trades snapshot
-                        openSimulatedTrades = tradingEngine.getOpenTrades(),
+                        // Keep open trades in sync with whatever the engine currently holds
+                        openSimulatedTrades = strategyEngine.snapshotOpenTrades(),
+                        // Preserve previous decision/signal so they don't get wiped on refresh
                         lastStrategyDecision = _uiState.value.lastStrategyDecision,
                         lastSimulatedSignal = _uiState.value.lastSimulatedSignal
                     )
@@ -85,10 +87,15 @@ class DashboardViewModel(
     }
 
     /**
-     * For now we simulate a candle around a fake price,
-     * run the strategy, and optionally open a simulated trade.
+     * Phase 1:
+     * For now we simulate a candle around a provided "fake" current price,
+     * then:
+     *  - pass the candle + account + riskConfig into StrategyEngine
+     *  - let StrategyEngine decide whether to open a paper trade
+     *  - update the UI state with the result
      *
-     * Later we will replace this by real Luno ticker/price data.
+     * Later we will replace fakeCurrentPrice with real data from Luno
+     * (ticker or OHLC) and possibly run on a timer / background worker.
      */
     fun runPaperStrategyOnce(fakeCurrentPrice: Double) {
         val currentState = _uiState.value
@@ -102,12 +109,12 @@ class DashboardViewModel(
             return
         }
 
-        // Fake candle: small random-ish range around current price.
+        // Fake candle: small range around the given price.
         val base = fakeCurrentPrice
         val open = base * 0.999
         val close = base * 1.001
-        val high = maxOf(open, close) * 1.001
-        val low = minOf(open, close) * 0.999
+        val high = maxOf(open, close) * 1.0005
+        val low = minOf(open, close) * 0.9995
 
         val candle = PriceCandle(
             timestampMillis = System.currentTimeMillis(),
@@ -118,52 +125,31 @@ class DashboardViewModel(
             volume = 1.0
         )
 
-        val decision = strategy.evaluate(candle)
-
-        when (decision) {
-            is StrategyDecision.NoTrade -> {
-                _uiState.value = currentState.copy(
-                    lastStrategyDecision = "NoTrade",
-                    lastSimulatedSignal = "Strategy decided: No trade for this candle."
-                )
-            }
-
-            is StrategyDecision.OpenLong -> {
-                val openResult = tradingEngine.tryOpenLongTrade(
-                    pair = decision.pair,
-                    accountSnapshot = account,
-                    riskConfig = riskConfig,
-                    entryPrice = decision.entryPrice,
-                    stopLossPrice = decision.stopLossPrice,
-                    takeProfitPrice = decision.takeProfitPrice
-                )
-
-                openResult.fold(
-                    onSuccess = { trade ->
-                        _uiState.value = _uiState.value.copy(
-                            lastStrategyDecision = "OpenLong ${trade.pair} @ ${trade.entryPrice.roundTwo()}",
-                            lastSimulatedSignal = buildString {
-                                append("Simulated LONG trade opened on ${trade.pair}.\n")
-                                append("Entry: ${trade.entryPrice.roundTwo()}, ")
-                                append("SL: ${trade.stopLossPrice.roundTwo()}, ")
-                                append("TP: ${trade.takeProfitPrice.roundTwo()}\n")
-                                append("Risk per trade: RM ${trade.riskAmountMyr.roundTwo()}")
-                            },
-                            openSimulatedTrades = tradingEngine.getOpenTrades()
-                        )
-                    },
-                    onFailure = { e ->
-                        _uiState.value = _uiState.value.copy(
-                            lastStrategyDecision = "OpenLongFailed",
-                            lastSimulatedSignal = "Failed to open simulated trade: ${e.message}",
-                            openSimulatedTrades = tradingEngine.getOpenTrades()
-                        )
-                    }
-                )
-            }
+        val result = try {
+            strategyEngine.runOnce(
+                candle = candle,
+                accountSnapshot = account,
+                riskConfig = riskConfig
+            )
+        } catch (e: Exception) {
+            _uiState.value = currentState.copy(
+                lastStrategyDecision = "Error",
+                lastSimulatedSignal = "Error while running strategy: ${e.message ?: "Unknown error"}",
+                openSimulatedTrades = strategyEngine.snapshotOpenTrades()
+            )
+            return
         }
+
+        _uiState.value = _uiState.value.copy(
+            lastStrategyDecision = result.decisionLabel,
+            lastSimulatedSignal = result.humanSignal,
+            openSimulatedTrades = result.openTrades
+        )
     }
 
+    /**
+     * Load RiskConfig cleanly from AppStorage, centralizing all defaulting logic.
+     */
     private fun loadRiskConfigFromStorage(): RiskConfig {
         val riskPct = storage.getRiskPerTradePercent()
         val dailyLossPct = storage.getDailyLossLimitPercent()
@@ -178,11 +164,6 @@ class DashboardViewModel(
             cooldownMinutesAfterLoss = cooldownMin,
             liveTradingEnabled = liveTrading
         )
-    }
-
-    private fun Double.roundTwo(): String {
-        val value = (this * 100.0).roundToInt() / 100.0
-        return "%,.2f".format(value)
     }
 }
 
@@ -204,6 +185,9 @@ data class DashboardUiState(
 
 /**
  * Factory to create DashboardViewModel with the proper dependencies.
+ *
+ * This keeps the wiring in one place and avoids leaking any Android
+ * or DI concerns into the pure domain layer.
  */
 class DashboardViewModelFactory(
     private val appStorage: AppStorage
@@ -214,15 +198,19 @@ class DashboardViewModelFactory(
             val lunoApiClient = LunoApiClient(appStorage)
             val accountRepository = AccountRepository(lunoApiClient)
             val riskManager = RiskManager()
-            val tradingEngine = PaperTradingEngine(riskManager)
-            val strategy = SimpleStrategy()
+            val paperTradingEngine = PaperTradingEngine(riskManager)
+            val simpleStrategy = SimpleStrategy()
+            val strategyEngine = StrategyEngine(
+                simpleStrategy = simpleStrategy,
+                paperTradingEngine = paperTradingEngine
+            )
+
             @Suppress("UNCHECKED_CAST")
             return DashboardViewModel(
                 accountRepository = accountRepository,
                 storage = appStorage,
                 riskManager = riskManager,
-                tradingEngine = tradingEngine,
-                strategy = strategy
+                strategyEngine = strategyEngine
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
