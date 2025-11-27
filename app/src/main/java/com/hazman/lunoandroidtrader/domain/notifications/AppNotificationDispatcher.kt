@@ -1,25 +1,38 @@
 package com.hazman.lunoandroidtrader.data.notifications
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.hazman.lunoandroidtrader.MainActivity
 import com.hazman.lunoandroidtrader.R
 import com.hazman.lunoandroidtrader.data.local.AppStorage
 import com.hazman.lunoandroidtrader.data.telegram.TelegramClient
 import com.hazman.lunoandroidtrader.domain.notifications.NotificationDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Application-level implementation of [NotificationDispatcher].
+ * Concrete implementation of [NotificationDispatcher] for the Android app.
  *
- * Behavior:
- *  - If Telegram bot token + chat ID exist in AppStorage:
- *      - Try sending the message via Telegram.
- *      - If sending fails, fall back to a local Android notification.
- *  - If Telegram config is missing:
- *      - Show a local Android notification directly.
+ * Responsibilities:
+ *  - Try to send trading signals to Telegram first, using [TelegramClient].
+ *  - If Telegram is not configured or fails for any reason, always fall back
+ *    to a local Android notification.
+ *  - Ensure a high-importance notification channel exists for the app.
+ *
+ * Design:
+ *  - All network calls are done on Dispatchers.IO.
+ *  - This class does *not* catch errors silently: any Telegram failure
+ *    leads to a local notification with a short explanation.
  */
 class AppNotificationDispatcher(
     private val context: Context,
@@ -28,77 +41,150 @@ class AppNotificationDispatcher(
 ) : NotificationDispatcher {
 
     companion object {
-        private const val CHANNEL_ID_SIGNALS = "trader_signals_channel"
-        private const val CHANNEL_NAME_SIGNALS = "Trading Signals"
-        private const val CHANNEL_DESC_SIGNALS =
-            "Notifications for simulated and live trading events from Luno Android Trader."
+        private const val CHANNEL_ID = "trading_signals_channel"
+        private const val CHANNEL_NAME = "Trading Signals"
+        private const val CHANNEL_DESCRIPTION = "Notifications for paper and live trading signals."
+
+        // Base ID; we increment so multiple signals don't overwrite each other.
+        private val notificationIdGenerator = AtomicInteger(10_000)
     }
 
+    private val notificationManager: NotificationManagerCompat =
+        NotificationManagerCompat.from(context)
+
+    init {
+        ensureNotificationChannel()
+    }
+
+    /**
+     * Public API used by ViewModels/domain to notify about trading signals.
+     *
+     * Behavior:
+     *  1. Try Telegram first.
+     *  2. If Telegram succeeds -> done.
+     *  3. If Telegram fails for *any* reason (including missing config),
+     *     show a local Android notification with the message and a brief
+     *     fallback reason.
+     */
     override suspend fun notifySignal(message: String) {
-        val botToken = storage.getTelegramBotToken().orEmpty().trim()
-        val chatId = storage.getTelegramChatId().orEmpty().trim()
-
-        val hasTelegramConfig = botToken.isNotEmpty() && chatId.isNotEmpty()
-
-        if (hasTelegramConfig) {
-            val result = telegramClient.sendMessage(message)
-            if (result.isSuccess) {
-                // Successfully sent via Telegram – nothing else to do.
-                return
+        // Try Telegram on IO dispatcher.
+        val telegramResult = withContext(Dispatchers.IO) {
+            try {
+                telegramClient.sendMessage(message)
+            } catch (e: Exception) {
+                Result.failure(e)
             }
-            // If Telegram failed (network, invalid credentials, etc.),
-            // we fall back to a local notification.
         }
 
-        showLocalNotification(message)
-    }
-
-    private fun showLocalNotification(message: String) {
-        createChannelIfNeeded()
-
-        val notificationId = (System.currentTimeMillis() and 0xFFFFFFF).toInt()
-
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID_SIGNALS)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Luno Android Trader")
-            .setContentText(
-                if (message.length > 60) {
-                    message.take(57) + "..."
-                } else {
-                    message
-                }
-            )
-            .setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText(message)
-            )
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-
-        with(NotificationManagerCompat.from(context)) {
-            notify(notificationId, builder.build())
+        if (telegramResult.isSuccess) {
+            // Telegram delivery OK – nothing else to do.
+            return
         }
+
+        val error = telegramResult.exceptionOrNull()
+        val fallbackReason = error?.message
+            ?: "Telegram is not configured or failed."
+
+        // Always fall back to local notification.
+        showLocalNotification(
+            message = message,
+            fallbackReason = fallbackReason
+        )
     }
 
-    private fun createChannelIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    /**
+     * Ensure the notification channel exists (Android 8+).
+     * Safe to call multiple times; creation is idempotent.
+     */
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
 
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            ?: return
+        val manager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return
 
-        val existing = manager.getNotificationChannel(CHANNEL_ID_SIGNALS)
-        if (existing != null) {
+        val existingChannel = manager.getNotificationChannel(CHANNEL_ID)
+        if (existingChannel != null) {
             return
         }
 
         val channel = NotificationChannel(
-            CHANNEL_ID_SIGNALS,
-            CHANNEL_NAME_SIGNALS,
-            NotificationManager.IMPORTANCE_DEFAULT
+            CHANNEL_ID,
+            CHANNEL_NAME,
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = CHANNEL_DESC_SIGNALS
+            description = CHANNEL_DESCRIPTION
+            enableLights(true)
+            enableVibration(true)
         }
 
         manager.createNotificationChannel(channel)
+    }
+
+    /**
+     * Show a local Android notification for the given signal message.
+     *
+     * @param message        The main trading signal text.
+     * @param fallbackReason Short explanation why Telegram was not used.
+     */
+    private fun showLocalNotification(
+        message: String,
+        fallbackReason: String?
+    ) {
+        // Android 13+ requires POST_NOTIFICATIONS permission.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val permissionCheck = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+            if (permissionCheck != PackageManager.PERMISSION_GRANTED) {
+                // Cannot show notifications; nothing more we can do here.
+                // The app should request this permission from UI elsewhere.
+                return
+            }
+        }
+
+        val title = "Trading Signal"
+
+        val fullText = buildString {
+            append(message.trim())
+            if (!fallbackReason.isNullOrBlank()) {
+                append("\n\n(Fell back to local notification: ")
+                append(fallbackReason.trim())
+                append(")")
+            }
+        }
+
+        // Tap action: open the app's main activity.
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            tapIntent,
+            pendingFlags
+        )
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher) // Use app launcher icon
+            .setContentTitle(title)
+            .setContentText(fullText.take(120)) // Single-line summary
+            .setStyle(NotificationCompat.BigTextStyle().bigText(fullText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        val notificationId = notificationIdGenerator.getAndIncrement()
+        notificationManager.notify(notificationId, builder.build())
     }
 }
