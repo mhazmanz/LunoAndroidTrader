@@ -3,75 +3,98 @@ package com.hazman.lunoandroidtrader.data.telegram
 import com.hazman.lunoandroidtrader.data.local.AppStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.logging.HttpLoggingInterceptor
-import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 /**
- * Simple Telegram Bot API client for sending messages.
+ * Thin, synchronous-by-design wrapper around the Telegram Bot API.
  *
- * For now we only implement a "send test message" call.
+ * Responsibilities:
+ *  - Read bot token + chat id from [AppStorage]
+ *  - Send simple text messages to that chat using Telegram Bot API
+ *  - Wrap all outcomes in Kotlin [Result] for easy success/failure handling
+ *
+ * This class does not know anything about Android UI. It is safe to call from
+ * any coroutine; network I/O is always done on [Dispatchers.IO].
  */
 class TelegramClient(
     private val storage: AppStorage
 ) {
 
-    private val client: OkHttpClient
-
-    init {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
-        client = OkHttpClient.Builder()
-            .addInterceptor(logging)
-            .build()
-    }
-
     /**
-     * Sends a test message to the configured Telegram chat.
+     * Send a plain-text message via Telegram's Bot API using the bot token and
+     * chat ID stored in [AppStorage].
      *
-     * Returns:
-     * - Result.success(Unit) on success
-     * - Result.failure(exception) on error
+     * @param text Human-readable message body.
+     *
+     * @return
+     *  - Result.success(Unit) if HTTP 200-299 and `"ok":true` in the response body
+     *  - Result.failure(...) otherwise (missing config, HTTP error, or exception)
      */
-    suspend fun sendTestMessage(
-        text: String = "LunoAndroidTrader: Telegram connectivity test"
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            val token = storage.getTelegramBotToken()
-            val chatId = storage.getTelegramChatId()
+    suspend fun sendMessage(text: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = storage.getTelegramBotToken()?.trim().orEmpty()
+        val chatId = storage.getTelegramChatId()?.trim().orEmpty()
 
-            if (token.isNullOrEmpty() || chatId.isNullOrEmpty()) {
+        if (token.isEmpty() || chatId.isEmpty()) {
+            // No configuration – signal failure so caller can fall back to local notification
+            return@withContext Result.failure(
+                IllegalStateException("Telegram token or chat ID is not configured.")
+            )
+        }
+
+        try {
+            // URL-encode the text to be safe.
+            val encodedText = URLEncoder.encode(text, "UTF-8")
+
+            // Basic Bot API sendMessage endpoint.
+            val urlString =
+                "https://api.telegram.org/bot$token/sendMessage" +
+                        "?chat_id=$chatId&text=$encodedText&parse_mode=Markdown"
+
+            val url = URL(urlString)
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                doInput = true
+            }
+
+            val statusCode = connection.responseCode
+
+            val responseBody = try {
+                val stream = if (statusCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+
+                stream?.use { s ->
+                    BufferedReader(InputStreamReader(s)).use { reader ->
+                        reader.readText()
+                    }
+                } ?: ""
+            } catch (e: Exception) {
+                ""
+            } finally {
+                connection.disconnect()
+            }
+
+            if (statusCode !in 200..299) {
                 return@withContext Result.failure(
-                    IllegalStateException("Telegram bot token or chat ID is not set.")
+                    IllegalStateException("Telegram HTTP $statusCode: $responseBody")
                 )
             }
 
-            // Telegram Bot API URL for sendMessage
-            val url = "https://api.telegram.org/bot$token/sendMessage"
-
-            val json = JSONObject().apply {
-                put("chat_id", chatId)
-                put("text", text)
-            }
-
-            val mediaType = "application/json; charset=utf-8".toMediaType()
-            val body = json.toString().toRequestBody(mediaType)
-
-            val request = Request.Builder()
-                .url(url)
-                .post(body)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(
-                        IllegalStateException("Telegram API error: HTTP ${response.code} ${response.message}")
-                    )
-                }
+            // Very small "ok":true check to confirm Telegram accepted the message.
+            // This avoids pulling a full JSON library here.
+            val ok = responseBody.contains("\"ok\":true")
+            if (!ok) {
+                return@withContext Result.failure(
+                    IllegalStateException("Telegram response not OK: $responseBody")
+                )
             }
 
             Result.success(Unit)
