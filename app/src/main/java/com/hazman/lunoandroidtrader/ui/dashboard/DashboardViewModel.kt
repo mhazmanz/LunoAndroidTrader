@@ -8,6 +8,7 @@ import com.hazman.lunoandroidtrader.data.local.AppStorage
 import com.hazman.lunoandroidtrader.data.luno.LunoApiClient
 import com.hazman.lunoandroidtrader.data.luno.LunoPublicService
 import com.hazman.lunoandroidtrader.domain.market.PriceCandle
+import com.hazman.lunoandroidtrader.domain.market.SimulatedTrade
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
 import com.hazman.lunoandroidtrader.domain.notifications.NotificationDispatcher
@@ -15,9 +16,12 @@ import com.hazman.lunoandroidtrader.domain.risk.RiskManager
 import com.hazman.lunoandroidtrader.domain.strategy.SimpleStrategy
 import com.hazman.lunoandroidtrader.domain.strategy.StrategyEngine
 import com.hazman.lunoandroidtrader.domain.trading.PaperTradingEngine
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -28,6 +32,7 @@ import kotlin.math.roundToInt
  * - Asking RiskManager for max risk per trade
  * - Delegating per-candle decisions to StrategyEngine
  * - Dispatching notifications via NotificationDispatcher when trades open
+ * - Running optional auto paper-trading loop using live Luno prices
  */
 class DashboardViewModel(
     private val accountRepository: AccountRepository,
@@ -40,6 +45,9 @@ class DashboardViewModel(
 
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
+
+    // Background job for auto paper-trading using live prices.
+    private var autoPaperJob: Job? = null
 
     /**
      * Refresh account + risk configuration from data sources.
@@ -156,12 +164,26 @@ class DashboardViewModel(
     }
 
     /**
-     * New function:
-     * Fetch a live ticker from Luno for the given pair (default XBTMYR),
-     * construct a synthetic candle around that real price,
-     * and run it through the StrategyEngine.
+     * Run paper strategy once using a live ticker from Luno for the given pair (default XBTMYR).
+     * This is a single-shot public entry point from the UI button.
      */
     fun runPaperStrategyOnceWithLivePrice(pair: String = "XBTMYR") {
+        viewModelScope.launch {
+            runPaperStrategyOnceWithLivePriceInternal(
+                pair = pair,
+                fromAutoLoop = false
+            )
+        }
+    }
+
+    /**
+     * Internal suspend implementation for live-price paper-strategy run.
+     * Used by both manual button and auto-trading loop.
+     */
+    private suspend fun runPaperStrategyOnceWithLivePriceInternal(
+        pair: String,
+        fromAutoLoop: Boolean
+    ) {
         val currentState = _uiState.value
         val account = currentState.accountSnapshot
         val riskConfig = currentState.riskConfig
@@ -173,103 +195,170 @@ class DashboardViewModel(
             return
         }
 
-        viewModelScope.launch {
+        if (!fromAutoLoop) {
             _uiState.value = _uiState.value.copy(
                 lastStrategyDecision = "FetchingTicker",
                 lastSimulatedSignal = "Fetching live ticker for $pair…"
             )
+        }
 
-            val tickerResponse = try {
-                lunoPublicService.getTicker(pair)
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    lastStrategyDecision = "TickerError",
-                    lastSimulatedSignal = "Error fetching ticker for $pair: ${e.message ?: "Unknown error"}"
-                )
-                return@launch
-            }
-
-            if (!tickerResponse.isSuccessful) {
-                _uiState.value = _uiState.value.copy(
-                    lastStrategyDecision = "TickerError",
-                    lastSimulatedSignal = "Ticker request failed for $pair. HTTP ${tickerResponse.code()}."
-                )
-                return@launch
-            }
-
-            val ticker = tickerResponse.body()
-            if (ticker == null) {
-                _uiState.value = _uiState.value.copy(
-                    lastStrategyDecision = "TickerError",
-                    lastSimulatedSignal = "No ticker body returned for $pair."
-                )
-                return@launch
-            }
-
-            val basePrice = ticker.lastTrade?.toDoubleOrNull()
-                ?: ticker.bid?.toDoubleOrNull()
-                ?: ticker.ask?.toDoubleOrNull()
-
-            if (basePrice == null) {
-                _uiState.value = _uiState.value.copy(
-                    lastStrategyDecision = "TickerError",
-                    lastSimulatedSignal = "Ticker for $pair did not contain a usable numeric price."
-                )
-                return@launch
-            }
-
-            // Build a candle around the live price (simple synthetic range).
-            val open = basePrice * 0.999
-            val close = basePrice * 1.001
-            val high = maxOf(open, close) * 1.0005
-            val low = minOf(open, close) * 0.9995
-
-            val candle = PriceCandle(
-                timestampMillis = ticker.timestamp ?: System.currentTimeMillis(),
-                open = open,
-                high = high,
-                low = low,
-                close = close,
-                volume = ticker.rolling24hVolume?.toDoubleOrNull() ?: 1.0
-            )
-
-            val result = try {
-                strategyEngine.runOnce(
-                    candle = candle,
-                    accountSnapshot = account,
-                    riskConfig = riskConfig
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    lastStrategyDecision = "Error",
-                    lastSimulatedSignal = "Error while running strategy on live price: ${e.message ?: "Unknown error"}",
-                    openSimulatedTrades = strategyEngine.snapshotOpenTrades()
-                )
-                return@launch
-            }
-
+        val tickerResponse = try {
+            lunoPublicService.getTicker(pair)
+        } catch (e: Exception) {
             _uiState.value = _uiState.value.copy(
-                lastStrategyDecision = result.decisionLabel,
-                lastSimulatedSignal = buildString {
-                    append("Live $pair price ≈ RM ${basePrice.roundTwo()}.\n")
-                    append(result.humanSignal)
-                },
-                openSimulatedTrades = result.openTrades
+                lastStrategyDecision = "TickerError",
+                lastSimulatedSignal = "Error fetching ticker for $pair: ${e.message ?: "Unknown error"}"
             )
+            return
+        }
 
-            // If a new simulated trade was opened, send a notification.
-            result.newlyOpenedTrade?.let {
-                val message = buildString {
-                    append("Simulated LONG opened (Live price run).\n")
-                    append("Pair: ${it.pair}\n")
-                    append("Entry: ${it.entryPrice.roundTwo()}, ")
-                    append("SL: ${it.stopLossPrice.roundTwo()}, ")
-                    append("TP: ${it.takeProfitPrice.roundTwo()}\n")
-                    append("Risk per trade: RM ${it.riskAmountMyr.roundTwo()}")
-                }
-                notificationDispatcher.notifySignal(message)
+        if (!tickerResponse.isSuccessful) {
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = "TickerError",
+                lastSimulatedSignal = "Ticker request failed for $pair. HTTP ${tickerResponse.code()}."
+            )
+            return
+        }
+
+        val ticker = tickerResponse.body()
+        if (ticker == null) {
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = "TickerError",
+                lastSimulatedSignal = "No ticker body returned for $pair."
+            )
+            return
+        }
+
+        val basePrice = ticker.lastTrade?.toDoubleOrNull()
+            ?: ticker.bid?.toDoubleOrNull()
+            ?: ticker.ask?.toDoubleOrNull()
+
+        if (basePrice == null) {
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = "TickerError",
+                lastSimulatedSignal = "Ticker for $pair did not contain a usable numeric price."
+            )
+            return
+        }
+
+        // Build a synthetic candle around the live price.
+        val open = basePrice * 0.999
+        val close = basePrice * 1.001
+        val high = maxOf(open, close) * 1.0005
+        val low = minOf(open, close) * 0.9995
+
+        val candle = PriceCandle(
+            timestampMillis = ticker.timestamp ?: System.currentTimeMillis(),
+            open = open,
+            high = high,
+            low = low,
+            close = close,
+            volume = ticker.rolling24hVolume?.toDoubleOrNull() ?: 1.0
+        )
+
+        val result = try {
+            strategyEngine.runOnce(
+                candle = candle,
+                accountSnapshot = account,
+                riskConfig = riskConfig
+            )
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(
+                lastStrategyDecision = "Error",
+                lastSimulatedSignal = "Error while running strategy on live price: ${e.message ?: "Unknown error"}",
+                openSimulatedTrades = strategyEngine.snapshotOpenTrades()
+            )
+            return
+        }
+
+        val infoPrefix = if (fromAutoLoop) {
+            "Auto paper run – live $pair price ≈ RM ${basePrice.roundTwo()}.\n"
+        } else {
+            "Live $pair price ≈ RM ${basePrice.roundTwo()}.\n"
+        }
+
+        _uiState.value = _uiState.value.copy(
+            lastStrategyDecision = result.decisionLabel,
+            lastSimulatedSignal = buildString {
+                append(infoPrefix)
+                append(result.humanSignal)
+            },
+            openSimulatedTrades = result.openTrades,
+            lastAutoPaperRunTimestampMillis = if (fromAutoLoop) System.currentTimeMillis() else _uiState.value.lastAutoPaperRunTimestampMillis
+        )
+
+        // If a new simulated trade was opened, send a notification.
+        result.newlyOpenedTrade?.let {
+            val message = buildString {
+                append(
+                    if (fromAutoLoop)
+                        "Auto paper trading – simulated LONG opened (Live price run).\n"
+                    else
+                        "Simulated LONG opened (Live price run).\n"
+                )
+                append("Pair: ${it.pair}\n")
+                append("Entry: ${it.entryPrice.roundTwo()}, ")
+                append("SL: ${it.stopLossPrice.roundTwo()}, ")
+                append("TP: ${it.takeProfitPrice.roundTwo()}\n")
+                append("Risk per trade: RM ${it.riskAmountMyr.roundTwo()}")
+            }
+            // Notification route: Telegram if configured, else local notification.
+            notificationDispatcher.notifySignal(message)
+        }
+    }
+
+    /**
+     * Start automatic paper-trading using live Luno prices.
+     *
+     * @param pair             Market pair, e.g. "XBTMYR".
+     * @param intervalMinutes  Interval between runs. Minimum enforced to 1 minute.
+     */
+    fun startAutoPaperTrading(
+        pair: String = "XBTMYR",
+        intervalMinutes: Int = 5
+    ) {
+        val safeInterval = intervalMinutes.coerceAtLeast(1)
+
+        // If already running, do nothing.
+        if (autoPaperJob?.isActive == true) {
+            _uiState.value = _uiState.value.copy(
+                autoPaperStatusMessage = "Auto paper trading already running every $safeInterval minutes for $pair."
+            )
+            return
+        }
+
+        _uiState.value = _uiState.value.copy(
+            isAutoPaperTradingEnabled = true,
+            autoPaperIntervalMinutes = safeInterval,
+            autoPaperStatusMessage = "Starting auto paper trading every $safeInterval minutes for $pair…"
+        )
+
+        autoPaperJob = viewModelScope.launch {
+            while (isActive) {
+                // Run the strategy once with live price.
+                runPaperStrategyOnceWithLivePriceInternal(
+                    pair = pair,
+                    fromAutoLoop = true
+                )
+
+                // Wait for the configured interval before the next loop.
+                val delayMillis = safeInterval * 60_000L
+                delay(delayMillis)
             }
         }
+    }
+
+    /**
+     * Stop automatic paper-trading if it is running.
+     */
+    fun stopAutoPaperTrading() {
+        autoPaperJob?.cancel()
+        autoPaperJob = null
+
+        _uiState.value = _uiState.value.copy(
+            isAutoPaperTradingEnabled = false,
+            autoPaperStatusMessage = "Auto paper trading stopped."
+        )
     }
 
     /**
@@ -314,7 +403,13 @@ data class DashboardUiState(
     // Paper-trading / strategy related
     val lastStrategyDecision: String? = null,
     val lastSimulatedSignal: String? = null,
-    val openSimulatedTrades: List<com.hazman.lunoandroidtrader.domain.market.SimulatedTrade> = emptyList()
+    val openSimulatedTrades: List<SimulatedTrade> = emptyList(),
+
+    // Auto paper-trading
+    val isAutoPaperTradingEnabled: Boolean = false,
+    val autoPaperIntervalMinutes: Int = 5,
+    val autoPaperStatusMessage: String? = null,
+    val lastAutoPaperRunTimestampMillis: Long? = null
 )
 
 /**

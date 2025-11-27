@@ -39,6 +39,7 @@ import kotlin.math.roundToInt
  *      - Refresh data
  *      - Run paper strategy once with a fake price
  *      - Run paper strategy once using live Luno ticker (XBTMYR)
+ *      - Start/Stop auto paper-trading using live Luno prices
  *
  * If Telegram is not configured, trade-open signals are delivered as
  * local Android notifications instead.
@@ -84,57 +85,25 @@ fun DashboardScreen(
             fontWeight = FontWeight.Bold
         )
 
-        // Action buttons
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = { viewModel.refresh() },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Refresh")
-                    }
-
-                    Button(
-                        onClick = {
-                            // Simple fixed fake price for testing.
-                            viewModel.runPaperStrategyOnce(fakeCurrentPrice = 250_000.0)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Run Fake Price")
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = {
-                            // Live ticker for XBTMYR. Later we can make this configurable.
-                            viewModel.runPaperStrategyOnceWithLivePrice(pair = "XBTMYR")
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Run Live XBTMYR")
-                    }
-                }
+        // Action buttons (Refresh, Fake Price, Single Live, Auto Paper)
+        ActionCard(
+            uiState = uiState,
+            onRefresh = { viewModel.refresh() },
+            onRunFakePrice = {
+                // Simple fixed fake price for testing.
+                viewModel.runPaperStrategyOnce(fakeCurrentPrice = 250_000.0)
+            },
+            onRunLiveOnce = {
+                viewModel.runPaperStrategyOnceWithLivePrice(pair = "XBTMYR")
+            },
+            onStartAutoPaper = {
+                // Default: XBTMYR, every 5 minutes. Tweak later if needed.
+                viewModel.startAutoPaperTrading(pair = "XBTMYR", intervalMinutes = 5)
+            },
+            onStopAutoPaper = {
+                viewModel.stopAutoPaperTrading()
             }
-        }
+        )
 
         if (uiState.isLoading) {
             Text(
@@ -174,6 +143,83 @@ fun DashboardScreen(
         AccountCard(uiState = uiState)
         RiskCard(uiState = uiState)
         StrategyCard(uiState = uiState)
+        AutoPaperStatusCard(uiState = uiState)
+    }
+}
+
+@Composable
+private fun ActionCard(
+    uiState: DashboardUiState,
+    onRefresh: () -> Unit,
+    onRunFakePrice: () -> Unit,
+    onRunLiveOnce: () -> Unit,
+    onStartAutoPaper: () -> Unit,
+    onStopAutoPaper: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onRefresh,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Refresh")
+                }
+
+                Button(
+                    onClick = onRunFakePrice,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Run Fake Price")
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onRunLiveOnce,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Run Live XBTMYR")
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (!uiState.isAutoPaperTradingEnabled) {
+                    Button(
+                        onClick = onStartAutoPaper,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Start Auto Paper (Live XBTMYR)")
+                    }
+                } else {
+                    Button(
+                        onClick = onStopAutoPaper,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Stop Auto Paper")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -341,6 +387,54 @@ private fun StrategyCard(uiState: DashboardUiState) {
                 text = "Open simulated trades: ${uiState.openSimulatedTrades.size}",
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+    }
+}
+
+@Composable
+private fun AutoPaperStatusCard(uiState: DashboardUiState) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "Auto Paper Trading",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                text = "Enabled: ${uiState.isAutoPaperTradingEnabled}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Text(
+                text = "Interval (minutes): ${uiState.autoPaperIntervalMinutes}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            uiState.lastAutoPaperRunTimestampMillis?.let { ts ->
+                Text(
+                    text = "Last run timestamp (ms): $ts",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            uiState.autoPaperStatusMessage?.let { msg ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = msg,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 }
