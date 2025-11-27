@@ -102,4 +102,31 @@ class TelegramClient(
             Result.failure(e)
         }
     }
+
+    /**
+     * Convenience helper used by SettingsScreen's "Send test message" button.
+     *
+     * - Uses the existing stored token + chat ID.
+     * - Sends a fixed diagnostic message.
+     * - Calls [onSuccess] on success, [onError] with a human-readable message on failure.
+     *
+     * This is suspend because it performs network I/O; call it from a coroutine
+     * (e.g. inside rememberCoroutineScope().launch { ... }).
+     */
+    suspend fun sendTestMessage(
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val result = sendMessage("Test message from Luno Android Trader ✅")
+
+        result.fold(
+            onSuccess = {
+                onSuccess()
+            },
+            onFailure = { e ->
+                val msg = e.message ?: e::class.java.simpleName ?: "Unknown error"
+                onError("Failed to send Telegram test message: $msg")
+            }
+        )
+    }
 }
