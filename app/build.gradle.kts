@@ -99,6 +99,12 @@ dependencies {
     // Retrofit Scalars converter (plain text / string responses)
     implementation("com.squareup.retrofit2:converter-scalars:2.11.0")
 
+    // Retrofit Gson converter (for public ticker models)
+    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+
+    // Gson core (for @SerializedName, JSON parsing)
+    implementation("com.google.code.gson:gson:2.11.0")
+
     // OkHttp logging
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
