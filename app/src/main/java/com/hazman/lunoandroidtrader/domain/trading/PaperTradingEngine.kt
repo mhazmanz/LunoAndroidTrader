@@ -1,180 +1,219 @@
 package com.hazman.lunoandroidtrader.domain.trading
 
-import com.hazman.lunoandroidtrader.domain.market.CloseReason
 import com.hazman.lunoandroidtrader.domain.market.PriceCandle
 import com.hazman.lunoandroidtrader.domain.market.SimulatedTrade
 import com.hazman.lunoandroidtrader.domain.market.TradeDirection
+import com.hazman.lunoandroidtrader.domain.market.TradeStatus
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
+import com.hazman.lunoandroidtrader.domain.risk.RiskDecision
 import com.hazman.lunoandroidtrader.domain.risk.RiskManager
-import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * PaperTradingEngine:
- * - Runs completely in memory; not persisted yet.
- * - Uses RiskManager to size positions based on equity & risk%.
- * - Accepts fake/real prices as PriceCandle and updates open positions.
+ * Reason for closing a simulated trade.
+ */
+enum class CloseReason {
+    TAKE_PROFIT,
+    STOP_LOSS
+}
+
+/**
+ * Closed trade record with realized P&L.
+ */
+data class ClosedTrade(
+    val trade: SimulatedTrade,
+    val closePrice: Double,
+    val closedAtMillis: Long,
+    val pnlMyr: Double,
+    val reason: CloseReason
+)
+
+/**
+ * Result of updating open trades with a new candle.
+ */
+data class PaperUpdateResult(
+    val closedTrades: List<ClosedTrade>,
+    val openTrades: List<SimulatedTrade>,
+    val totalRealizedPnlMyr: Double
+)
+
+/**
+ * PaperTradingEngine manages the lifecycle of simulated trades:
+ *  - Opens new trades with size derived from the risk manager.
+ *  - Closes trades when TP or SL is hit by the candle OHLC.
+ *  - Tracks total realized P&L in MYR.
+ *
+ * This engine is pure-paper: it never touches real Luno accounts.
  */
 class PaperTradingEngine(
     private val riskManager: RiskManager
 ) {
 
     private val openTrades = mutableListOf<SimulatedTrade>()
-    private val closedTrades = mutableListOf<SimulatedTrade>()
-
+    private var totalRealizedPnlMyr: Double = 0.0
     private var nextTradeId: Long = 1L
 
     /**
-     * Get snapshot of current open trades.
+     * Get a snapshot of current open trades.
      */
-    fun getOpenTrades(): List<SimulatedTrade> = openTrades.toList()
+    fun snapshotOpenTrades(): List<SimulatedTrade> = openTrades.map { it.copy() }
 
     /**
-     * Get snapshot of closed trades.
-     */
-    fun getClosedTrades(): List<SimulatedTrade> = closedTrades.toList()
-
-    /**
-     * Main entry to request a new trade.
+     * Try to open a LONG trade on the given pair using the candle close as entry.
      *
-     * For now, we only support LONG direction.
-     * Later we can add SHORT support if needed and if exchange allows it.
+     * Risk model:
+     *  - Risk per trade (MYR) = equity * riskPerTradePercent / 100.
+     *  - Stop loss = entryPrice * (1 - BASE_SL_PCT).
+     *  - Take profit = entryPrice * (1 + 2 * BASE_SL_PCT). (2R target)
+     *  - Quantity (base) = riskAmountMyr / (entryPrice - stopLossPrice).
+     *
+     * If risk checks fail, returns null.
      */
     fun tryOpenLongTrade(
-        pair: String,
-        accountSnapshot: AccountSnapshot,
-        riskConfig: RiskConfig,
-        entryPrice: Double,
-        stopLossPrice: Double,
-        takeProfitPrice: Double
-    ): Result<SimulatedTrade> {
-        // Compute how much RM we are allowed to risk.
-        val maxRisk = riskManager.computeMaxRiskPerTradeMyr(riskConfig, accountSnapshot)
-        if (maxRisk <= 0.0) {
-            return Result.failure(IllegalStateException("Max risk per trade is zero or negative. Check risk settings or account balance."))
-        }
+        pair: String = "XBTMYR",
+        candle: PriceCandle,
+        account: AccountSnapshot,
+        riskConfig: RiskConfig
+    ): SimulatedTrade? {
+        val nowMillis = candle.timestampMillis
 
-        // Calculate position size so that:
-        // riskAmountMyr ≈ maxRisk, based on entryPrice and stopLossPrice.
-        val positionSizeBase = computePositionSizeBaseForRisk(
-            maxRiskMyr = maxRisk,
-            entryPrice = entryPrice,
-            stopLossPrice = stopLossPrice
+        // 1) Risk checks
+        val decision: RiskDecision = riskManager.canOpenNewTrade(
+            riskConfig = riskConfig,
+            account = account,
+            nowMillis = nowMillis
         )
-
-        if (positionSizeBase <= 0.0) {
-            return Result.failure(IllegalStateException("Computed position size is zero. Check entry/stop prices."))
+        if (!decision.canOpen) {
+            return null
         }
+
+        // 2) Compute risk amount
+        val maxRiskMyr = riskManager.computeMaxRiskPerTradeMyr(riskConfig, account)
+        if (maxRiskMyr <= 0.0) {
+            return null
+        }
+
+        val entryPrice = candle.close
+        if (entryPrice <= 0.0) {
+            return null
+        }
+
+        // Base % distance to SL: 0.5% of price
+        val BASE_SL_PCT = 0.005
+        val slPrice = entryPrice * (1.0 - BASE_SL_PCT)
+        val tpPrice = entryPrice * (1.0 + BASE_SL_PCT * 2.0)
+
+        val perUnitRiskMyr = entryPrice - slPrice
+        if (perUnitRiskMyr <= 0.0) {
+            return null
+        }
+
+        // Quantity in base asset (e.g. BTC)
+        var quantityBase = maxRiskMyr / perUnitRiskMyr
+
+        // Basic sanity clamping.
+        if (!quantityBase.isFinite() || quantityBase <= 0.0) {
+            return null
+        }
+
+        val MIN_QTY = 0.0001
+        quantityBase = max(quantityBase, MIN_QTY)
 
         val trade = SimulatedTrade(
             id = nextTradeId++,
             pair = pair,
             direction = TradeDirection.LONG,
             entryPrice = entryPrice,
-            positionSizeBase = positionSizeBase,
-            riskAmountMyr = maxRisk,
-            stopLossPrice = stopLossPrice,
-            takeProfitPrice = takeProfitPrice,
-            openedAtMillis = System.currentTimeMillis()
+            stopLossPrice = slPrice,
+            takeProfitPrice = tpPrice,
+            quantityBase = quantityBase,
+            riskAmountMyr = maxRiskMyr,
+            openedAtMillis = nowMillis,
+            status = TradeStatus.OPEN
         )
 
         openTrades.add(trade)
-        return Result.success(trade)
+        riskManager.registerOpenedTrade(nowMillis)
+
+        return trade
     }
 
     /**
-     * Update all open trades with a new price candle.
+     * Update all open trades given a new candle.
      *
-     * - If candle's low <= stopLossPrice => close at stopLossPrice (STOP_LOSS)
-     * - Else if candle's high >= takeProfitPrice => close at takeProfitPrice (TAKE_PROFIT)
-     *
-     * For simplicity, we assume one price per trade; later we can use more refined logic.
+     * For each trade, we check:
+     *  - If candle.low <= SL: close at SL.
+     *  - Else if candle.high >= TP: close at TP.
+     *  - If both SL and TP are within the candle range, we assume SL hit first
+     *    (conservative assumption).
      */
-    fun onNewPrice(pair: String, candle: PriceCandle): List<SimulatedTrade> {
-        val affectedTrades = mutableListOf<SimulatedTrade>()
+    fun updateOpenTrades(
+        candle: PriceCandle,
+        riskConfig: RiskConfig
+    ): PaperUpdateResult {
+        if (openTrades.isEmpty()) {
+            return PaperUpdateResult(
+                closedTrades = emptyList(),
+                openTrades = emptyList(),
+                totalRealizedPnlMyr = totalRealizedPnlMyr
+            )
+        }
 
+        val closedTrades = mutableListOf<ClosedTrade>()
         val iterator = openTrades.iterator()
+
         while (iterator.hasNext()) {
             val trade = iterator.next()
-            if (trade.pair != pair) {
+
+            val hitSl = candle.low <= trade.stopLossPrice
+            val hitTp = candle.high >= trade.takeProfitPrice
+
+            if (!hitSl && !hitTp) {
                 continue
             }
 
-            var shouldClose = false
-            var closeReason: CloseReason? = null
-            var closePrice = candle.close
+            val reason: CloseReason
+            val closePrice: Double
 
-            // Long position:
-            // - stop-loss if price falls to/below stopLossPrice
-            // - take-profit if price rises to/above takeProfitPrice
-            if (trade.direction == TradeDirection.LONG) {
-                if (candle.low <= trade.stopLossPrice) {
-                    shouldClose = true
-                    closeReason = CloseReason.STOP_LOSS
-                    closePrice = trade.stopLossPrice
-                } else if (candle.high >= trade.takeProfitPrice) {
-                    shouldClose = true
-                    closeReason = CloseReason.TAKE_PROFIT
-                    closePrice = trade.takeProfitPrice
-                }
+            if (hitSl && hitTp) {
+                // Conservative: assume SL first.
+                reason = CloseReason.STOP_LOSS
+                closePrice = trade.stopLossPrice
+            } else if (hitSl) {
+                reason = CloseReason.STOP_LOSS
+                closePrice = trade.stopLossPrice
+            } else {
+                reason = CloseReason.TAKE_PROFIT
+                closePrice = trade.takeProfitPrice
             }
 
-            if (shouldClose && closeReason != null) {
-                val pnl = computePnlMyr(
-                    direction = trade.direction,
-                    positionSizeBase = trade.positionSizeBase,
-                    entryPrice = trade.entryPrice,
-                    exitPrice = closePrice
-                )
+            // For LONG:
+            val pnlMyr = (closePrice - trade.entryPrice) * trade.quantityBase
+            totalRealizedPnlMyr += pnlMyr
 
-                val closed = trade.copy(
-                    closedAtMillis = candle.timestampMillis,
-                    closePrice = closePrice,
-                    pnlMyr = pnl,
-                    closeReason = closeReason
-                )
+            iterator.remove()
 
-                iterator.remove()
-                closedTrades.add(closed)
-                affectedTrades.add(closed)
-            }
+            val closed = ClosedTrade(
+                trade = trade.copy(status = TradeStatus.CLOSED),
+                closePrice = closePrice,
+                closedAtMillis = candle.timestampMillis,
+                pnlMyr = pnlMyr,
+                reason = reason
+            )
+            closedTrades.add(closed)
+
+            riskManager.registerClosedTrade(
+                pnlMyr = pnlMyr,
+                closedAtMillis = candle.timestampMillis
+            )
         }
 
-        return affectedTrades.toList()
-    }
-
-    /**
-     * Very simplistic calculation:
-     *
-     * For LONG:
-     * riskAmountMyr = positionSizeBase * abs(entryPrice - stopLossPrice)
-     *
-     * => positionSizeBase = riskAmountMyr / abs(entryPrice - stopLossPrice)
-     */
-    private fun computePositionSizeBaseForRisk(
-        maxRiskMyr: Double,
-        entryPrice: Double,
-        stopLossPrice: Double
-    ): Double {
-        val priceDiff = abs(entryPrice - stopLossPrice)
-        if (priceDiff <= 0.0) return 0.0
-        return maxRiskMyr / priceDiff
-    }
-
-    /**
-     * PnL in MYR for a closed trade.
-     */
-    private fun computePnlMyr(
-        direction: TradeDirection,
-        positionSizeBase: Double,
-        entryPrice: Double,
-        exitPrice: Double
-    ): Double {
-        val diff = exitPrice - entryPrice
-        val pnlPerUnit = when (direction) {
-            TradeDirection.LONG -> diff
-            TradeDirection.SHORT -> -diff
-        }
-        return positionSizeBase * pnlPerUnit
+        return PaperUpdateResult(
+            closedTrades = closedTrades,
+            openTrades = snapshotOpenTrades(),
+            totalRealizedPnlMyr = totalRealizedPnlMyr
+        )
     }
 }

@@ -2,109 +2,130 @@ package com.hazman.lunoandroidtrader.domain.risk
 
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * RiskManager holds the pure risk logic for:
- * - Position sizing
- * - Daily loss cap
- * - Trade count limits
- * - Cooldown logic (later we will track timestamps & session P&L)
+ * Result of checking whether a new trade can be opened.
+ */
+data class RiskDecision(
+    val canOpen: Boolean,
+    val reason: String? = null
+)
+
+/**
+ * In-memory risk manager.
  *
- * This class does NOT know about Android, Retrofit, or UI.
- * It only works with clean domain models.
+ * Responsibilities:
+ *  - Compute max risk per trade in MYR given [RiskConfig] + [AccountSnapshot].
+ *  - Track very simple "daily" stats (trades opened, realized losses) and
+ *    enforce:
+ *      - Max trades per day
+ *      - Daily loss limit
+ *
+ * Notes:
+ *  - "Day" is approximated as UTC days from epoch (simple, deterministic).
+ *  - State is held in-memory for the lifetime of the process. On app restart,
+ *    counters reset. This is acceptable for an initial version.
  */
 class RiskManager {
 
+    // We store a simple "day key" derived from epoch millis (UTC).
+    private var currentDayKey: Long? = null
+    private var tradesOpenedToday: Int = 0
+    private var realizedLossMyrToday: Double = 0.0
+
     /**
-     * Compute the maximum capital (in MYR) that can be risked on a single trade,
-     * given a RiskConfig and current AccountSnapshot.
+     * Ensure counters are synced with the current UTC "day".
+     * If the day key changed, reset daily stats.
+     */
+    private fun ensureDay(nowMillis: Long) {
+        val dayKey = nowMillis / (24L * 60L * 60L * 1000L)
+        if (currentDayKey == null || currentDayKey != dayKey) {
+            currentDayKey = dayKey
+            tradesOpenedToday = 0
+            realizedLossMyrToday = 0.0
+        }
+    }
+
+    /**
+     * Compute max risk per trade in MYR.
      *
+     * riskPerTradePercent is interpreted as a percentage of account equity.
      * Example:
-     * - equity = 50 MYR
-     * - riskPerTradePercent = 1.0
-     * => max risk per trade = 0.5 MYR
+     *  - equity = 10,000 MYR
+     *  - riskPerTradePercent = 1.5
+     *  => 150 MYR risk per trade
      */
     fun computeMaxRiskPerTradeMyr(
         riskConfig: RiskConfig,
         account: AccountSnapshot
     ): Double {
-        val pct = max(0.0, riskConfig.riskPerTradePercent)
-        return account.totalEquityMyr * (pct / 100.0)
+        val equity = max(account.totalEquityMyr, 0.0)
+        val pct = riskConfig.riskPerTradePercent.coerceAtLeast(0.0)
+        return equity * pct / 100.0
     }
 
     /**
-     * Given:
-     * - RiskConfig
-     * - current AccountSnapshot
-     * - planned stop distance (% from entry to stop)
+     * Evaluate whether opening a new trade is allowed under the risk config.
      *
-     * Return the maximum position size (in MYR) that respects riskPerTradePercent.
-     *
-     * For example:
-     * - equity = 50 MYR
-     * - riskPerTradePercent = 1% => 0.5 MYR risk
-     * - stopDistancePercent = 2% (if price moves -2% we hit SL)
-     * => position size = 0.5 / (2/100) = 25 MYR
-     */
-    fun computePositionSizeMyr(
-        riskConfig: RiskConfig,
-        account: AccountSnapshot,
-        stopDistancePercent: Double
-    ): Double {
-        val maxRiskMyr = computeMaxRiskPerTradeMyr(riskConfig, account)
-
-        // Avoid division by zero or silly negative values
-        val stopPct = if (stopDistancePercent <= 0.0) {
-            // Fallback: assume a 1% stop if not specified
-            1.0
-        } else {
-            stopDistancePercent
-        }
-
-        return maxRiskMyr / (stopPct / 100.0)
-    }
-
-    /**
-     * Decide if we are allowed to open a new trade, based on:
-     * - daily loss limit
-     * - max trades per day
-     * - cooldown after loss
-     *
-     * For now this is a stub that always returns true.
-     * Later we will add:
-     * - tracking of daily starting equity vs current equity
-     * - counting trades opened today
-     * - storing timestamp of last loss / last stop-out
+     * Checks:
+     *  - Max trades per day
+     *  - Daily loss limit (based on equity and realizedLossMyrToday)
      */
     fun canOpenNewTrade(
         riskConfig: RiskConfig,
         account: AccountSnapshot,
-        tradesOpenedToday: Int,
-        currentDailyDrawdownPercent: Double,
-        isInCooldown: Boolean
-    ): Boolean {
-        // Check live trading flag (if off, we always allow "paper" trades)
-        if (!riskConfig.liveTradingEnabled) {
-            // This will be interpreted by higher layers as "paper trading allowed".
-            return true
+        nowMillis: Long
+    ): RiskDecision {
+        ensureDay(nowMillis)
+
+        // Max trades per day
+        if (riskConfig.maxTradesPerDay > 0 &&
+            tradesOpenedToday >= riskConfig.maxTradesPerDay
+        ) {
+            return RiskDecision(
+                canOpen = false,
+                reason = "Max trades per day reached (${riskConfig.maxTradesPerDay})."
+            )
         }
 
-        // Enforce daily loss limit
-        if (currentDailyDrawdownPercent >= riskConfig.dailyLossLimitPercent) {
-            return false
+        // Daily loss limit
+        val equity = max(account.totalEquityMyr, 1.0)
+        val dailyLossLimitPct = riskConfig.dailyLossLimitPercent.coerceAtLeast(0.0)
+        if (dailyLossLimitPct > 0.0 && realizedLossMyrToday < 0.0) {
+            val lossPct = abs(realizedLossMyrToday) / equity * 100.0
+            if (lossPct >= dailyLossLimitPct) {
+                return RiskDecision(
+                    canOpen = false,
+                    reason = "Daily loss limit reached (${lossPct.format2()}% ≥ ${dailyLossLimitPct}%)."
+                )
+            }
         }
 
-        // Enforce max trades per day
-        if (tradesOpenedToday >= riskConfig.maxTradesPerDay) {
-            return false
-        }
-
-        // Enforce cooldown
-        if (isInCooldown) {
-            return false
-        }
-
-        return true
+        return RiskDecision(canOpen = true)
     }
+
+    /**
+     * Must be called whenever a trade is successfully opened.
+     */
+    fun registerOpenedTrade(nowMillis: Long) {
+        ensureDay(nowMillis)
+        tradesOpenedToday += 1
+    }
+
+    /**
+     * Must be called whenever a trade is closed.
+     *
+     * We only track realized **losses** against the daily loss limit; profits
+     * simply don't change [realizedLossMyrToday].
+     */
+    fun registerClosedTrade(pnlMyr: Double, closedAtMillis: Long) {
+        ensureDay(closedAtMillis)
+        if (pnlMyr < 0.0) {
+            realizedLossMyrToday += pnlMyr
+        }
+    }
+
+    private fun Double.format2(): String = "%,.2f".format(this)
 }

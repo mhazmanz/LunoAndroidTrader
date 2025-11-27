@@ -4,115 +4,150 @@ import com.hazman.lunoandroidtrader.domain.market.PriceCandle
 import com.hazman.lunoandroidtrader.domain.market.SimulatedTrade
 import com.hazman.lunoandroidtrader.domain.model.AccountSnapshot
 import com.hazman.lunoandroidtrader.domain.model.RiskConfig
+import com.hazman.lunoandroidtrader.domain.trading.ClosedTrade
 import com.hazman.lunoandroidtrader.domain.trading.PaperTradingEngine
+import com.hazman.lunoandroidtrader.domain.trading.PaperUpdateResult
 import kotlin.math.roundToInt
 
 /**
- * Result of a single strategy evaluation + (simulated) execution step.
+ * Result of running the strategy once on a single candle.
  *
- * newlyOpenedTrade:
- *  - is null when no new trade was opened in this step
- *  - is the SimulatedTrade that was just opened (if any)
+ * This is what DashboardViewModel consumes.
  */
-data class StrategyEngineResult(
+data class StrategyRunResult(
     val decisionLabel: String,
     val humanSignal: String,
     val openTrades: List<SimulatedTrade>,
-    val newlyOpenedTrade: SimulatedTrade? = null
+    val newlyOpenedTrade: SimulatedTrade? = null,
+    val closedTrades: List<ClosedTrade> = emptyList(),
+    val totalRealizedPnlMyr: Double = 0.0
 )
 
 /**
- * StrategyEngine is the high-level coordinator for strategy execution.
+ * StrategyEngine wires together:
+ *  - Candle history
+ *  - [SimpleStrategy] entry logic
+ *  - [PaperTradingEngine] trade lifecycle and P&L
  *
- * Responsibilities:
- * - Accept a PriceCandle + AccountSnapshot + RiskConfig
- * - Ask the configured strategy (SimpleStrategy for now) for a decision
- * - If a trade should be opened, use PaperTradingEngine to size/execute it
- * - Return a StrategyEngineResult with all information needed by the UI
- *
- * This class:
- * - Knows nothing about Android, ViewModels, or Retrofit.
- * - Only works with domain models and pure logic.
+ * It is called once per "tick" (in this app, once per fake or live candle).
  */
 class StrategyEngine(
     private val simpleStrategy: SimpleStrategy,
     private val paperTradingEngine: PaperTradingEngine
 ) {
 
+    private val candleHistory = mutableListOf<PriceCandle>()
+
     /**
-     * Run the strategy once for the given inputs.
+     * Main entry point: run the strategy on a single candle.
      *
-     * Upper layers must guarantee that:
-     * - accountSnapshot and riskConfig are valid (non-null, sane values)
-     * - candle comes from some price source (fake or real)
+     * @param candle         New candle to process.
+     * @param accountSnapshot Current account snapshot (for sizing & risk).
+     * @param riskConfig     Current risk configuration.
      */
     fun runOnce(
         candle: PriceCandle,
         accountSnapshot: AccountSnapshot,
         riskConfig: RiskConfig
-    ): StrategyEngineResult {
-        val decision = simpleStrategy.evaluate(candle)
+    ): StrategyRunResult {
+        candleHistory.add(candle)
 
-        return when (decision) {
-            is StrategyDecision.NoTrade -> {
-                StrategyEngineResult(
-                    decisionLabel = "NoTrade",
-                    humanSignal = "Strategy decided: No trade for this candle.",
-                    openTrades = paperTradingEngine.getOpenTrades(),
-                    newlyOpenedTrade = null
-                )
+        // 1) Update existing trades (check TP/SL).
+        val updateResult: PaperUpdateResult =
+            paperTradingEngine.updateOpenTrades(candle, riskConfig)
+
+        // 2) Ask strategy whether to open a new trade.
+        val decision = simpleStrategy.decide(candleHistory)
+        var newlyOpenedTrade: SimulatedTrade? = null
+        var decisionLabel = decision.label
+
+        if (decision.shouldOpenLong) {
+            val trade = paperTradingEngine.tryOpenLongTrade(
+                pair = "XBTMYR",
+                candle = candle,
+                account = accountSnapshot,
+                riskConfig = riskConfig
+            )
+            newlyOpenedTrade = trade
+            if (trade == null) {
+                decisionLabel += " | New LONG blocked by risk limits or invalid sizing."
+            } else {
+                decisionLabel += " | NEW LONG opened."
             }
-
-            is StrategyDecision.OpenLong -> {
-                val openResult = paperTradingEngine.tryOpenLongTrade(
-                    pair = decision.pair,
-                    accountSnapshot = accountSnapshot,
-                    riskConfig = riskConfig,
-                    entryPrice = decision.entryPrice,
-                    stopLossPrice = decision.stopLossPrice,
-                    takeProfitPrice = decision.takeProfitPrice
-                )
-
-                openResult.fold(
-                    onSuccess = { trade ->
-                        StrategyEngineResult(
-                            decisionLabel = "OpenLong ${trade.pair} @ ${trade.entryPrice.roundTwo()}",
-                            humanSignal = buildString {
-                                append("Simulated LONG trade opened on ${trade.pair}.\n")
-                                append("Entry: ${trade.entryPrice.roundTwo()}, ")
-                                append("SL: ${trade.stopLossPrice.roundTwo()}, ")
-                                append("TP: ${trade.takeProfitPrice.roundTwo()}\n")
-                                append("Risk per trade: RM ${trade.riskAmountMyr.roundTwo()}")
-                            },
-                            openTrades = paperTradingEngine.getOpenTrades(),
-                            newlyOpenedTrade = trade
-                        )
-                    },
-                    onFailure = { e ->
-                        StrategyEngineResult(
-                            decisionLabel = "OpenLongFailed",
-                            humanSignal = "Failed to open simulated trade: ${e.message ?: "Unknown error"}",
-                            openTrades = paperTradingEngine.getOpenTrades(),
-                            newlyOpenedTrade = null
-                        )
-                    }
-                )
-            }
+        } else {
+            decisionLabel += " | No new entries."
         }
+
+        // 3) Build human-readable summary for the UI.
+        val human = buildHumanSignal(
+            candle = candle,
+            decisionLabel = decisionLabel,
+            updateResult = updateResult,
+            newlyOpenedTrade = newlyOpenedTrade
+        )
+
+        return StrategyRunResult(
+            decisionLabel = decisionLabel,
+            humanSignal = human,
+            openTrades = updateResult.openTrades,
+            newlyOpenedTrade = newlyOpenedTrade,
+            closedTrades = updateResult.closedTrades,
+            totalRealizedPnlMyr = updateResult.totalRealizedPnlMyr
+        )
     }
 
     /**
-     * Convenience snapshot for upper layers that just want open trades
-     * without running a new candle through the strategy.
+     * Snapshot of current open trades, used by Dashboard.
      */
-    fun snapshotOpenTrades(): List<SimulatedTrade> = paperTradingEngine.getOpenTrades()
+    fun snapshotOpenTrades(): List<SimulatedTrade> = paperTradingEngine.snapshotOpenTrades()
 
     /**
-     * Local rounding helper, formatting to 2 decimal places and using
-     * a grouped/locale-friendly format (e.g. "12,345.67").
+     * Build a readable explanation string for the last run, suitable for the UI.
      */
-    private fun Double.roundTwo(): String {
-        val value = (this * 100.0).roundToInt() / 100.0
-        return "%,.2f".format(value)
+    private fun buildHumanSignal(
+        candle: PriceCandle,
+        decisionLabel: String,
+        updateResult: PaperUpdateResult,
+        newlyOpenedTrade: SimulatedTrade?
+    ): String {
+        val sb = StringBuilder()
+
+        sb.append("Candle @ ${candle.timestampMillis} | ")
+        sb.append("O=${candle.open.round2()}, H=${candle.high.round2()}, ")
+        sb.append("L=${candle.low.round2()}, C=${candle.close.round2()}.\n")
+
+        sb.append(decisionLabel).append("\n")
+
+        if (updateResult.closedTrades.isNotEmpty()) {
+            sb.append("Closed trades this run: ${updateResult.closedTrades.size}.\n")
+            updateResult.closedTrades.forEach { closed ->
+                sb.append(
+                    " - ${closed.trade.pair} ${closed.reason} @ ${closed.closePrice.round2()} | " +
+                            "PnL: ${closed.pnlMyr.round2()} MYR.\n"
+                )
+            }
+        }
+
+        if (newlyOpenedTrade != null) {
+            sb.append(
+                "Opened new LONG ${newlyOpenedTrade.pair} @ " +
+                        "${newlyOpenedTrade.entryPrice.round2()} | " +
+                        "SL=${newlyOpenedTrade.stopLossPrice.round2()}, " +
+                        "TP=${newlyOpenedTrade.takeProfitPrice.round2()}, " +
+                        "Risk≈${newlyOpenedTrade.riskAmountMyr.round2()} MYR.\n"
+            )
+        }
+
+        sb.append(
+            "Open simulated trades: ${updateResult.openTrades.size}. " +
+                    "Total realized P&L (paper): ${updateResult.totalRealizedPnlMyr.round2()} MYR."
+        )
+
+        return sb.toString()
+    }
+
+    private fun Double.round2(): String {
+        val v = (this * 100.0).roundToInt() / 100.0
+        return "%,.2f".format(v)
     }
 }

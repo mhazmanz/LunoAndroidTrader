@@ -1,8 +1,9 @@
 package com.hazman.lunoandroidtrader.domain.market
 
 /**
- * Basic price candle representation.
- * Later we can map real Luno OHLC data into this.
+ * Basic OHLCV candle used by the strategy engine and paper trading.
+ *
+ * All prices are assumed to be in MYR for the current pair (e.g. XBTMYR).
  */
 data class PriceCandle(
     val timestampMillis: Long,
@@ -14,7 +15,8 @@ data class PriceCandle(
 )
 
 /**
- * Direction of a trade.
+ * Direction of a simulated trade. For now we only open LONGs, but the enum is
+ * future-proofed for SHORTs if we add them later.
  */
 enum class TradeDirection {
     LONG,
@@ -22,30 +24,38 @@ enum class TradeDirection {
 }
 
 /**
- * Simulated trade model for our paper-trading engine.
+ * Status of a simulated trade.
+ *
+ * We mainly track open trades in memory; closed trades are kept separately as
+ * [ClosedTrade] entries in the paper engine. Status is therefore mostly for
+ * debugging / future extensions.
+ */
+enum class TradeStatus {
+    OPEN,
+    CLOSED
+}
+
+/**
+ * Simulated trade representation for the UI and notification layer.
+ *
+ * Important fields (already used in the app):
+ *  - [pair]
+ *  - [entryPrice]
+ *  - [stopLossPrice]
+ *  - [takeProfitPrice]
+ *  - [riskAmountMyr]
+ *
+ * Additional fields make it easier to extend / debug without breaking the UI.
  */
 data class SimulatedTrade(
     val id: Long,
     val pair: String,
     val direction: TradeDirection,
     val entryPrice: Double,
-    val positionSizeBase: Double,   // e.g., XBT amount
-    val riskAmountMyr: Double,      // how much MYR is at risk based on stopLossPrice
     val stopLossPrice: Double,
     val takeProfitPrice: Double,
+    val quantityBase: Double,
+    val riskAmountMyr: Double,
     val openedAtMillis: Long,
-    val closedAtMillis: Long? = null,
-    val closePrice: Double? = null,
-    val pnlMyr: Double? = null,
-    val closeReason: CloseReason? = null
+    val status: TradeStatus = TradeStatus.OPEN
 )
-
-/**
- * Why the trade was closed.
- */
-enum class CloseReason {
-    STOP_LOSS,
-    TAKE_PROFIT,
-    MANUAL_EXIT,
-    STRATEGY_EXIT
-}
